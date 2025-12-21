@@ -20,3 +20,19 @@ body:
       label: What happened?
     validations:
       required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the system is affected?
+      options:
+        - Frontend (UI)
+        - Backend (API)
+        - Database
+        - Auth / Permissions
+        - Deploy / Docker
+        - CI/CD
+        - Docs
+        - Other
+    validations:
+      required: true
