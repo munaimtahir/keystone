@@ -16,7 +16,6 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "keystone.settings")
 django.setup()
 
 from django.core.management import call_command
-from django.test.utils import get_runner
 from api.models import Repository, App, Deployment
 
 
@@ -37,7 +36,7 @@ def test_migrations():
     print("   ✓ No missing migrations detected")
     
     print("\n3. Verifying migration can be applied...")
-    call_command("migrate", "--run-syncdb", verbosity=0)
+    call_command("migrate", verbosity=0)
     print("   ✓ Migrations applied successfully")
 
 
