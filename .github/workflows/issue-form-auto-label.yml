@@ -1,0 +1,69 @@
+name: Auto-label issues from Issue Forms
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  auto-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply labels based on Issue Form fields
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.issue.number;
+            const body = context.payload.issue.body || "";
+
+            const labelsToAdd = new Set();
+
+            // -----------------------------
+            // Detect Severity
+            // -----------------------------
+            if (/Severity[\s\S]*Critical/i.test(body)) {
+              labelsToAdd.add("severity:critical");
+            } else if (/Severity[\s\S]*High/i.test(body)) {
+              labelsToAdd.add("severity:high");
+            } else if (/Severity[\s\S]*Medium/i.test(body)) {
+              labelsToAdd.add("severity:medium");
+            } else if (/Severity[\s\S]*Low/i.test(body)) {
+              labelsToAdd.add("severity:low");
+            }
+
+            // -----------------------------
+            // Detect Area
+            // -----------------------------
+            if (/Area[\s\S]*Frontend/i.test(body)) {
+              labelsToAdd.add("area:frontend");
+            } else if (/Area[\s\S]*Backend/i.test(body)) {
+              labelsToAdd.add("area:backend");
+            } else if (/Area[\s\S]*Database/i.test(body)) {
+              labelsToAdd.add("area:database");
+            } else if (/Area[\s\S]*Auth/i.test(body)) {
+              labelsToAdd.add("area:auth");
+            } else if (/Area[\s\S]*(Deploy|Docker)/i.test(body)) {
+              labelsToAdd.add("area:deploy");
+            } else if (/Area[\s\S]*(CI\/CD|CI)/i.test(body)) {
+              labelsToAdd.add("area:ci");
+            } else if (/Area[\s\S]*Docs/i.test(body)) {
+              labelsToAdd.add("area:docs");
+            } else if (/Area[\s\S]*Other/i.test(body)) {
+              labelsToAdd.add("area:other");
+            }
+
+            // -----------------------------
+            // Apply labels (if any)
+            // -----------------------------
+            if (labelsToAdd.size > 0) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number,
+                labels: Array.from(labelsToAdd),
+              });
+            }
