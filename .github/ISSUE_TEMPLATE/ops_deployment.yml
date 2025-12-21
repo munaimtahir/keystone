@@ -1,0 +1,11 @@
+name: "🚀 Ops / Deployment"
+description: Deployment related task
+title: "[Deploy]: "
+labels: ["deploy"]
+body:
+  - type: textarea
+    id: change
+    attributes:
+      label: What is changing?
+    validations:
+      required: true

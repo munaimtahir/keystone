@@ -1,0 +1,11 @@
+name: "🧩 Implementation task"
+description: Concrete development task
+title: "[Task]: "
+labels: ["task"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Task summary
+    validations:
+      required: true

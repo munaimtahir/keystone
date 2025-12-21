@@ -1,0 +1,22 @@
+name: "🐛 Bug report"
+description: Report something broken
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What happened?
+    validations:
+      required: true

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions / Discussion
+    url: https://github.com/YOUR_USERNAME/YOUR_REPO/discussions
+    about: Use Discussions for questions and ideas.
+  - name: Security reports
+    url: https://github.com/YOUR_USERNAME/YOUR_REPO/security/policy
+    about: Please report security vulnerabilities privately.
