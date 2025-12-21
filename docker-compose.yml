@@ -1,0 +1,68 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [platform]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./platform/backend
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
+      DJANGO_DEBUG: ${DJANGO_DEBUG}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS}
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      RUNNER_SHARED_TOKEN: ${RUNNER_SHARED_TOKEN}
+      PORT_RANGE_START: ${PORT_RANGE_START}
+      PORT_RANGE_END: ${PORT_RANGE_END}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks: [platform]
+    volumes:
+      - ./platform/backend:/app
+
+  runner:
+    build:
+      context: ./platform/backend
+      dockerfile: Dockerfile.runner
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      RUNNER_SHARED_TOKEN: ${RUNNER_SHARED_TOKEN}
+      PORT_RANGE_START: ${PORT_RANGE_START}
+      PORT_RANGE_END: ${PORT_RANGE_END}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [platform]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./runtime/repos:/runtime/repos
+      - ./runtime/logs:/runtime/logs
+
+  frontend:
+    build:
+      context: ./platform/frontend
+    environment:
+      VITE_API_BASE: ${VITE_API_BASE}
+    ports:
+      - "8080:80"
+    networks: [platform]
+
+networks:
+  platform:
+
+volumes:
+  pgdata:

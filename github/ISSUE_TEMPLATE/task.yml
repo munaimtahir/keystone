@@ -1,0 +1,11 @@
+name: Implementation task
+description: Small implementation checklist
+title: "task: "
+labels: ["task"]
+body:
+  - type: textarea
+    id: work
+    attributes:
+      label: Work items
+      value: |
+        - [ ] ...
