@@ -25,14 +25,24 @@ services:
       RUNNER_SHARED_TOKEN: ${RUNNER_SHARED_TOKEN}
       PORT_RANGE_START: ${PORT_RANGE_START}
       PORT_RANGE_END: ${PORT_RANGE_END}
+      DJANGO_FORCE_SCRIPT_NAME: /keystone
     depends_on:
       db:
         condition: service_healthy
     ports:
       - "8000:8000"
-    networks: [platform]
+    networks: [platform, proxy]
     volumes:
       - ./platform/backend:/app
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keystone-backend.entrypoints=web"
+      - "traefik.http.routers.keystone-backend.rule=PathPrefix(`/keystone/api`) || PathPrefix(`/keystone/admin`) || PathPrefix(`/keystone/static`)"
+      - "traefik.http.routers.keystone-backend.priority=10"
+      - "traefik.http.middlewares.keystone-backend-stripprefix.stripprefix.prefixes=/keystone"
+      - "traefik.http.routers.keystone-backend.middlewares=keystone-backend-stripprefix"
+      - "traefik.http.services.keystone-backend.loadbalancer.server.port=8000"
+      - "traefik.docker.network=proxy"
 
   runner:
     build:
@@ -56,13 +66,24 @@ services:
     build:
       context: ./platform/frontend
     environment:
-      VITE_API_BASE: ${VITE_API_BASE}
+      VITE_API_BASE: ${VITE_API_BASE:-/keystone}
     ports:
       - "8080:80"
-    networks: [platform]
+    networks: [platform, proxy]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keystone-frontend.entrypoints=web"
+      - "traefik.http.routers.keystone-frontend.rule=PathPrefix(`/keystone`)"
+      - "traefik.http.routers.keystone-frontend.priority=5"
+      - "traefik.http.middlewares.keystone-frontend-stripprefix.stripprefix.prefixes=/keystone"
+      - "traefik.http.routers.keystone-frontend.middlewares=keystone-frontend-stripprefix"
+      - "traefik.http.services.keystone-frontend.loadbalancer.server.port=80"
+      - "traefik.docker.network=proxy"
 
 networks:
   platform:
+  proxy:
+    external: true
 
 volumes:
   pgdata:
