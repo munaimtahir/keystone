@@ -78,6 +78,7 @@ def _check_docker_available():
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     except (FileNotFoundError, OSError):
+        # Command 'which' not found or other OS-level errors - continue to fallback methods
         pass
     
     try:
@@ -86,6 +87,7 @@ def _check_docker_available():
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     except (FileNotFoundError, OSError):
+        # Command 'which' not found or other OS-level errors - continue to fallback methods
         pass
     
     # Try common docker paths
@@ -102,7 +104,8 @@ def _truncate_error(error_msg: str, max_length: int = 500) -> str:
     
     truncated = error_msg[:max_length]
     last_space = truncated.rfind(" ")
-    if last_space != -1:
+    # Only use a space as a truncation point if it is not the very first character
+    if last_space > 0:
         return truncated[:last_space].rstrip() + "..."
     else:
         return truncated.rstrip() + "..."
@@ -217,9 +220,9 @@ def deploy_one(dep: Deployment):
         if r2.returncode != 0:
             dep.status="failed"
             build_error = r2.stderr.strip() or r2.stdout.strip() or "unknown build error"
-            # Check for common docker errors (preserve original error message for output)
+            # Check for common docker errors and provide appropriate prefix
             if "Cannot connect to the Docker daemon" in build_error or "permission denied" in build_error.lower():
-                error_summary = f"Docker daemon connection issue: {_truncate_error(build_error, 150)}"
+                error_summary = f"Docker daemon error: {_truncate_error(build_error, 150)}"
             else:
                 error_summary = f"Docker build failed: {_truncate_error(build_error, 200)}"
             dep.error_summary = error_summary
@@ -227,9 +230,9 @@ def deploy_one(dep: Deployment):
         elif r3.returncode != 0:
             dep.status="failed"
             run_error = r3.stderr.strip() or r3.stdout.strip() or "unknown run error"
-            # Check for common docker errors (preserve original error message for output)
+            # Check for common docker errors and provide appropriate prefix
             if "Cannot connect to the Docker daemon" in run_error or "permission denied" in run_error.lower():
-                error_summary = f"Docker daemon connection issue: {_truncate_error(run_error, 150)}"
+                error_summary = f"Docker daemon error: {_truncate_error(run_error, 150)}"
             else:
                 error_summary = f"Docker run failed: {_truncate_error(run_error, 200)}"
             dep.error_summary = error_summary
