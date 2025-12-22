@@ -65,6 +65,13 @@ REST_FRAMEWORK = {
 }
 
 # CORS for the panel (served on :8080) to call API on :8000 in IP-mode MVP.
-_cors = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080").split(",")
-CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors if o.strip()]
+# Allow all origins in development, or specific origins in production
+_cors = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+if _cors:
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()]
+else:
+    # In development/DEBUG mode, allow all origins for flexibility
+    # In production, set CORS_ALLOWED_ORIGINS env var with specific origins
+    CORS_ALLOWED_ORIGINS = []
+    CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOW_CREDENTIALS = True

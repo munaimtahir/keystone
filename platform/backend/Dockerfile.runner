@@ -5,7 +5,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     docker.io \
     && rm -rf /var/lib/apt/lists/* \
-    && which docker || ln -s /usr/bin/docker.io /usr/local/bin/docker || true
+    && (which docker || (ln -sf /usr/bin/docker.io /usr/local/bin/docker && which docker)) || true \
+    && echo "Docker check: $(which docker || echo 'NOT FOUND')" \
+    && echo "Docker.io check: $(which docker.io || echo 'NOT FOUND')" \
+    && ls -la /usr/bin/docker* || true
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app

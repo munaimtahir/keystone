@@ -71,20 +71,149 @@ def _health_check(port: int, path: str) -> bool:
 
 def _check_docker_available():
     """Check if docker command is available."""
+    import json
+    import urllib.request
+    import urllib.error
+    
+    # #region agent log
+    try:
+        log_data = {
+            "sessionId": "debug-session",
+            "runId": "docker-check",
+            "hypothesisId": "A",
+            "location": "runner.py:_check_docker_available:75",
+            "message": "Starting docker availability check",
+            "data": {"PATH": os.environ.get("PATH", ""), "PWD": os.getcwd()},
+            "timestamp": int(time.time() * 1000)
+        }
+        req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
+                                   data=json.dumps(log_data).encode('utf-8'),
+                                   headers={'Content-Type': 'application/json'},
+                                   method='POST')
+        urllib.request.urlopen(req, timeout=0.1).close()
+    except: pass
+    # #endregion
+    
     # Try 'docker' first
     result = subprocess.run(["which", "docker"], capture_output=True, text=True)
+    
+    # #region agent log
+    try:
+        log_data = {
+            "sessionId": "debug-session",
+            "runId": "docker-check",
+            "hypothesisId": "A",
+            "location": "runner.py:_check_docker_available:82",
+            "message": "which docker result",
+            "data": {"returncode": result.returncode, "stdout": result.stdout.strip(), "stderr": result.stderr.strip()},
+            "timestamp": int(time.time() * 1000)
+        }
+        req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
+                                   data=json.dumps(log_data).encode('utf-8'),
+                                   headers={'Content-Type': 'application/json'},
+                                   method='POST')
+        urllib.request.urlopen(req, timeout=0.1).close()
+    except: pass
+    # #endregion
+    
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     
     # Try 'docker.io' (some Debian/Ubuntu installations)
     result = subprocess.run(["which", "docker.io"], capture_output=True, text=True)
+    
+    # #region agent log
+    try:
+        log_data = {
+            "sessionId": "debug-session",
+            "runId": "docker-check",
+            "hypothesisId": "B",
+            "location": "runner.py:_check_docker_available:95",
+            "message": "which docker.io result",
+            "data": {"returncode": result.returncode, "stdout": result.stdout.strip(), "stderr": result.stderr.strip()},
+            "timestamp": int(time.time() * 1000)
+        }
+        req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
+                                   data=json.dumps(log_data).encode('utf-8'),
+                                   headers={'Content-Type': 'application/json'},
+                                   method='POST')
+        urllib.request.urlopen(req, timeout=0.1).close()
+    except: pass
+    # #endregion
+    
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     
     # Try common docker paths
+    checked_paths = []
     for path in ["/usr/bin/docker", "/usr/bin/docker.io", "/usr/local/bin/docker"]:
-        if os.path.exists(path):
+        exists = os.path.exists(path)
+        checked_paths.append({"path": path, "exists": exists})
+        if exists:
+            # #region agent log
+            try:
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "docker-check",
+                    "hypothesisId": "C",
+                    "location": "runner.py:_check_docker_available:115",
+                    "message": "Found docker at path",
+                    "data": {"path": path, "exists": exists},
+                    "timestamp": int(time.time() * 1000)
+                }
+                req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
+                                           data=json.dumps(log_data).encode('utf-8'),
+                                           headers={'Content-Type': 'application/json'},
+                                           method='POST')
+                urllib.request.urlopen(req, timeout=0.1).close()
+            except: pass
+            # #endregion
             return path
+    
+    # #region agent log
+    try:
+        log_data = {
+            "sessionId": "debug-session",
+            "runId": "docker-check",
+            "hypothesisId": "A,B,C",
+            "location": "runner.py:_check_docker_available:130",
+            "message": "Docker not found - all checks failed",
+            "data": {"checked_paths": checked_paths, "PATH": os.environ.get("PATH", "")},
+            "timestamp": int(time.time() * 1000)
+        }
+        req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
+                                   data=json.dumps(log_data).encode('utf-8'),
+                                   headers={'Content-Type': 'application/json'},
+                                   method='POST')
+        urllib.request.urlopen(req, timeout=0.1).close()
+    except: pass
+    # #endregion
+    
+    # Final check: try to execute docker --version to verify it works
+    if checked_paths:
+        for path_info in checked_paths:
+            if path_info["exists"]:
+                test_result = subprocess.run([path_info["path"], "--version"], capture_output=True, text=True, timeout=5)
+                # #region agent log
+                try:
+                    log_data = {
+                        "sessionId": "debug-session",
+                        "runId": "docker-check",
+                        "hypothesisId": "D",
+                        "location": "runner.py:_check_docker_available:140",
+                        "message": "Testing docker execution",
+                        "data": {"path": path_info["path"], "returncode": test_result.returncode, "stdout": test_result.stdout[:100]},
+                        "timestamp": int(time.time() * 1000)
+                    }
+                    req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
+                                               data=json.dumps(log_data).encode('utf-8'),
+                                               headers={'Content-Type': 'application/json'},
+                                               method='POST')
+                    urllib.request.urlopen(req, timeout=0.1).close()
+                except: pass
+                # #endregion
+                if test_result.returncode == 0:
+                    return path_info["path"]
     
     return None
 
@@ -98,6 +227,27 @@ def deploy_one(dep: Deployment):
     
     # Check docker availability early
     docker_cmd = _check_docker_available()
+    
+    # #region agent log
+    try:
+        import json
+        log_data = {
+            "sessionId": "debug-session",
+            "runId": "deploy-one",
+            "hypothesisId": "A,B,C",
+            "location": "runner.py:deploy_one:101",
+            "message": "Docker check result in deploy_one",
+            "data": {"docker_cmd": docker_cmd, "deployment_id": dep.id, "app_name": app.name},
+            "timestamp": int(time.time() * 1000)
+        }
+        req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
+                                   data=json.dumps(log_data).encode('utf-8'),
+                                   headers={'Content-Type': 'application/json'},
+                                   method='POST')
+        urllib.request.urlopen(req, timeout=0.1).close()
+    except: pass
+    # #endregion
+    
     if not docker_cmd:
         logp = LOGS_DIR / f"deploy_{dep.id}.log"
         with open(logp, "w", encoding="utf-8") as f:
