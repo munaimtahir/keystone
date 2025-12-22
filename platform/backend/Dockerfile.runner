@@ -5,4 +5,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends git docker.io &
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
-CMD ["bash","-lc","python runner.py"]
+CMD ["bash","-lc","python manage.py migrate && python runner.py"]

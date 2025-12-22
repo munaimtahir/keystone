@@ -10,11 +10,16 @@ ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS","*").split(",")
 INSTALLED_APPS = [
   "django.contrib.admin","django.contrib.auth","django.contrib.contenttypes",
   "django.contrib.sessions","django.contrib.messages","django.contrib.staticfiles",
-  "rest_framework","api",
+  "corsheaders",
+  "rest_framework",
+  "rest_framework.authtoken",
+  "api",
 ]
 
 MIDDLEWARE = [
   "django.middleware.security.SecurityMiddleware",
+  "whitenoise.middleware.WhiteNoiseMiddleware",
+  "corsheaders.middleware.CorsMiddleware",
   "django.contrib.sessions.middleware.SessionMiddleware",
   "django.middleware.common.CommonMiddleware",
   "django.middleware.csrf.CsrfViewMiddleware",
@@ -40,5 +45,26 @@ LANGUAGE_CODE="en-us"
 TIME_ZONE="Asia/Karachi"
 USE_I18N=True
 USE_TZ=True
-STATIC_URL="static/"
+
+# Subpath deployment support
+FORCE_SCRIPT_NAME = os.getenv("DJANGO_FORCE_SCRIPT_NAME", "")
+STATIC_URL = f"{FORCE_SCRIPT_NAME}/static/" if FORCE_SCRIPT_NAME else "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
 DEFAULT_AUTO_FIELD="django.db.models.BigAutoField"
+
+# DRF: require auth by default (UI + API protected) and support token auth for SPA.
+REST_FRAMEWORK = {
+  "DEFAULT_AUTHENTICATION_CLASSES": [
+    "rest_framework.authentication.SessionAuthentication",
+    "rest_framework.authentication.TokenAuthentication",
+  ],
+  "DEFAULT_PERMISSION_CLASSES": [
+    "rest_framework.permissions.IsAuthenticated",
+  ],
+}
+
+# CORS for the panel (served on :8080) to call API on :8000 in IP-mode MVP.
+_cors = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080").split(",")
+CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors if o.strip()]
+CORS_ALLOW_CREDENTIALS = True

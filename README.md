@@ -6,11 +6,17 @@ Internal deployment control plane for a single VM (Ubuntu 24.04).
 
 ## Quick start (VM)
 1) Install Docker + Docker Compose v2  
-2) `cp .env.example .env`  
+2) `cp env.example .env`  
 3) `docker compose up -d --build`  
 4) Open:
 - Panel: `http://<VM_IP>:8080`
 - API health: `http://<VM_IP>:8000/api/health`
+
+## Login
+Keystone uses **token authentication** for the UI/API.
+
+- Default credentials (when `DJANGO_DEBUG=1`): **`admin / admin`**
+- Production: set `KEYSTONE_ADMIN_USERNAME`, `KEYSTONE_ADMIN_PASSWORD`, `KEYSTONE_ADMIN_EMAIL` in your environment.
 
 ## App access (IP mode)
 Deployed apps: `http://<VM_IP>:<assigned_port>` where port is **9000–9999**.
