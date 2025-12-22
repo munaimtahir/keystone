@@ -95,6 +95,18 @@ def _check_docker_available():
     
     return None
 
+def _truncate_error(error_msg: str, max_length: int = 500) -> str:
+    """Truncate error message at word boundary to avoid cutting mid-word."""
+    if len(error_msg) <= max_length:
+        return error_msg
+    
+    truncated = error_msg[:max_length]
+    last_space = truncated.rfind(" ")
+    if last_space != -1:
+        return truncated[:last_space].rstrip() + "..."
+    else:
+        return truncated.rstrip() + "..."
+
 def deploy_one(dep: Deployment):
     app = dep.app
     repo = app.repo
@@ -207,9 +219,9 @@ def deploy_one(dep: Deployment):
             build_error = r2.stderr.strip() or r2.stdout.strip() or "unknown build error"
             # Check for common docker errors (preserve original error message for output)
             if "Cannot connect to the Docker daemon" in build_error or "permission denied" in build_error.lower():
-                error_summary = f"Docker daemon connection issue: {build_error[:150]}"
+                error_summary = f"Docker daemon connection issue: {_truncate_error(build_error, 150)}"
             else:
-                error_summary = f"Docker build failed: {build_error[:200]}"
+                error_summary = f"Docker build failed: {_truncate_error(build_error, 200)}"
             dep.error_summary = error_summary
             app.status="failed"
         elif r3.returncode != 0:
@@ -217,9 +229,9 @@ def deploy_one(dep: Deployment):
             run_error = r3.stderr.strip() or r3.stdout.strip() or "unknown run error"
             # Check for common docker errors (preserve original error message for output)
             if "Cannot connect to the Docker daemon" in run_error or "permission denied" in run_error.lower():
-                error_summary = f"Docker daemon connection issue: {run_error[:150]}"
+                error_summary = f"Docker daemon connection issue: {_truncate_error(run_error, 150)}"
             else:
-                error_summary = f"Docker run failed: {run_error[:200]}"
+                error_summary = f"Docker run failed: {_truncate_error(run_error, 200)}"
             dep.error_summary = error_summary
             app.status="failed"
         elif not _health_check(port, app.health_check_path):
@@ -266,17 +278,7 @@ def main():
                     print(f"Failed to write log file: {log_error}")
             
             dep.status = "failed"
-            # Truncate error message at word boundary to avoid cutting mid-word
-            max_error_length = 500
-            error_summary_details = error_details
-            if len(error_summary_details) > max_error_length:
-                truncated = error_summary_details[:max_error_length]
-                last_space = truncated.rfind(" ")
-                if last_space != -1:
-                    error_summary_details = truncated[:last_space].rstrip() + "..."
-                else:
-                    error_summary_details = truncated.rstrip() + "..."
-            dep.error_summary = f"Deployment failed: {error_summary_details}"
+            dep.error_summary = f"Deployment failed: {_truncate_error(error_details, 500)}"
             dep.ended_at = timezone.now()
             dep.save(update_fields=["status", "error_summary", "ended_at", "logs_path"])
             # Safety check for dep.app accessibility
