@@ -77,7 +77,7 @@ def _check_docker_available():
         result = subprocess.run(["which", "docker"], capture_output=True, text=True)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError):
         pass
     
     try:
@@ -85,7 +85,7 @@ def _check_docker_available():
         result = subprocess.run(["which", "docker.io"], capture_output=True, text=True)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError):
         pass
     
     # Try common docker paths
