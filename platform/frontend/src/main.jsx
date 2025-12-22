@@ -63,16 +63,7 @@ function isValidGitUrl(url) {
 }
 
 function App() {
-  // #region agent log
-  const rawApiBase = import.meta.env.VITE_API_BASE;
-  console.log('[DEBUG] VITE_API_BASE raw value:', rawApiBase, 'type:', typeof rawApiBase, 'isFalsy:', !rawApiBase, 'isEmpty:', rawApiBase === '');
-  fetch('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.jsx:66',message:'VITE_API_BASE env var value',data:{rawApiBase,type:typeof rawApiBase,isFalsy:!rawApiBase,isEmpty:rawApiBase===''},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   const api = (import.meta.env.VITE_API_BASE && import.meta.env.VITE_API_BASE.trim()) || ""
-  // #region agent log
-  console.log('[DEBUG] Final api base value:', api, 'length:', api.length, 'will use relative URLs:', api === '');
-  fetch('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.jsx:68',message:'Final api base value',data:{api,apiLength:api.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   const [token, setToken] = React.useState(localStorage.getItem("keystone_token") || "")
   const [username, setUsername] = React.useState("")
   const [password, setPassword] = React.useState("")
@@ -99,21 +90,10 @@ function App() {
     }
     if (token) headers.set("Authorization", `Token ${token}`)
     const fetchUrl = `${api}${path}`
-    // #region agent log
-    console.log('[DEBUG] About to fetch:', fetchUrl, 'api base:', api, 'path:', path, 'method:', opts.method || 'GET');
-    fetch('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.jsx:92',message:'About to fetch API',data:{fetchUrl,api,path,method:opts.method||'GET'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     let res;
     try {
       res = await fetch(fetchUrl, { ...opts, headers })
-      // #region agent log
-      fetch('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.jsx:96',message:'Fetch response received',data:{status:res.status,statusText:res.statusText,ok:res.ok,url:res.url},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
     } catch (fetchError) {
-      // #region agent log
-      console.error('[DEBUG] Fetch error:', fetchError.message, 'name:', fetchError.name, 'url:', fetchUrl, 'error:', fetchError);
-      fetch('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.jsx:100',message:'Fetch error caught',data:{errorMessage:fetchError.message,errorName:fetchError.name,errorStack:fetchError.stack,fetchUrl},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
       throw fetchError
     }
     const text = await res.text()
@@ -160,27 +140,18 @@ function App() {
     setError("")
     setInfo("")
     setLoading(true)
-    // #region agent log
-    fetch('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.jsx:132',message:'Login attempt started',data:{username,api,hasPassword:!!password},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     try {
       const data = await apiFetch("/api/auth/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
       })
-      // #region agent log
-      fetch('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.jsx:142',message:'Login success',data:{hasToken:!!data.token,username:data.username},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
       localStorage.setItem("keystone_token", data.token)
       setToken(data.token)
       setUsername("")
       setPassword("")
       setInfo(`Logged in as ${data.username}`)
     } catch (e) {
-      // #region agent log
-      fetch('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.jsx:149',message:'Login error caught',data:{errorMessage:e.message,errorName:e.name,api},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
       setError(e.message)
     } finally {
       setLoading(false)
