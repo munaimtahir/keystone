@@ -8,6 +8,11 @@ class Repository(models.Model):
     git_url = models.URLField()
     default_branch = models.CharField(max_length=120, default="main")
     github_token = EncryptedTextField(blank=True, default="", help_text="GitHub PAT for private repos (encrypted at rest)")
+    prepared_for_deployment = models.BooleanField(default=False, help_text="Whether repo has been inspected and prepared for deployment")
+    deployment_config = models.JSONField(default=dict, blank=True, help_text="Standardized deployment configuration")
+    inspection_status = models.CharField(max_length=20, default="pending", choices=[("pending", "Pending"), ("inspecting", "Inspecting"), ("ready", "Ready"), ("failed", "Failed")])
+    inspection_details = models.JSONField(default=dict, blank=True, help_text="Details from inspection process")
+    last_inspected_at = models.DateTimeField(null=True, blank=True)
     def __str__(self): return self.name
 
 class App(models.Model):
