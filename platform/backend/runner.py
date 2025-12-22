@@ -103,11 +103,13 @@ def deploy_one(dep: Deployment):
         dep.logs_path=str(logp)
         if r3.returncode != 0:
             dep.status="failed"
-            dep.error_summary="Rollback failed. See logs."
+            run_error = r3.stderr.strip() or r3.stdout.strip() or "unknown run error"
+            dep.error_summary=f"Rollback failed: {run_error[:200]}"
             app.status="failed"
         elif not _health_check(port, app.health_check_path):
             dep.status="failed"
-            dep.error_summary="Health check failed after 30 seconds."
+            health_path = app.health_check_path or "/"
+            dep.error_summary=f"Health check failed: App did not respond at http://127.0.0.1:{port}{health_path} within 30 seconds"
             app.status="failed"
         else:
             dep.status="success"
@@ -122,11 +124,16 @@ def deploy_one(dep: Deployment):
 
         # Fail fast on git errors, saving logs first.
         if r.returncode != 0:
+            error_msg = r.stderr.strip() or r.stdout.strip() or "unknown error"
             with open(logp,"w",encoding="utf-8") as f:
-                f.write("=== git ===\n"+r.stdout+r.stderr+"\n")
+                f.write("=== git ===\n")
+                f.write(f"Command: git {'clone' if not workdir.exists() else 'pull'}\n")
+                f.write(f"Return code: {r.returncode}\n")
+                f.write(f"Stdout: {r.stdout}\n")
+                f.write(f"Stderr: {r.stderr}\n")
             dep.logs_path=str(logp)
             dep.status="failed"
-            dep.error_summary=f"Git operation failed: {r.stderr.strip() or 'unknown error'}"
+            dep.error_summary=f"Git operation failed: {error_msg}"
             dep.ended_at=timezone.now()
             dep.save(update_fields=["status","error_summary","ended_at","logs_path"])
             app.status="failed"
@@ -148,13 +155,20 @@ def deploy_one(dep: Deployment):
             f.write("=== run ===\n"+r3.stdout+r3.stderr+"\n")
 
         dep.logs_path=str(logp)
-        if r2.returncode != 0 or r3.returncode != 0:
+        if r2.returncode != 0:
             dep.status="failed"
-            dep.error_summary="Build or run failed. See logs."
+            build_error = r2.stderr.strip() or r2.stdout.strip() or "unknown build error"
+            dep.error_summary=f"Docker build failed: {build_error[:200]}"
+            app.status="failed"
+        elif r3.returncode != 0:
+            dep.status="failed"
+            run_error = r3.stderr.strip() or r3.stdout.strip() or "unknown run error"
+            dep.error_summary=f"Docker run failed: {run_error[:200]}"
             app.status="failed"
         elif not _health_check(port, app.health_check_path):
             dep.status="failed"
-            dep.error_summary="Health check failed after 30 seconds."
+            health_path = app.health_check_path or "/"
+            dep.error_summary=f"Health check failed: App did not respond at http://127.0.0.1:{port}{health_path} within 30 seconds"
             app.status="failed"
         else:
             dep.status="success"
@@ -174,11 +188,26 @@ def main():
         try:
             deploy_one(dep)
         except Exception as e:
-            dep.status="failed"
-            dep.error_summary=str(e)
-            dep.ended_at=timezone.now()
-            dep.save(update_fields=["status","error_summary","ended_at"])
-            dep.app.status="failed"
+            import traceback
+            error_details = str(e)
+            error_traceback = traceback.format_exc()
+            
+            # Write error to log file if deployment exists
+            if dep and dep.id:
+                logp = LOGS_DIR / f"deploy_{dep.id}.log"
+                try:
+                    with open(logp, "w", encoding="utf-8") as f:
+                        f.write("=== exception ===\n")
+                        f.write(error_traceback + "\n")
+                    dep.logs_path = str(logp)
+                except Exception:
+                    pass  # Don't fail if we can't write logs
+            
+            dep.status = "failed"
+            dep.error_summary = f"Deployment failed: {error_details}"
+            dep.ended_at = timezone.now()
+            dep.save(update_fields=["status", "error_summary", "ended_at", "logs_path"])
+            dep.app.status = "failed"
             dep.app.save(update_fields=["status"])
         time.sleep(1)
 
