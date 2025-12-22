@@ -22,7 +22,31 @@ from .serializers import (
 
 REPOS_DIR = Path("/runtime/repos")
 REPOS_DIR.mkdir(parents=True, exist_ok=True)
+DEBUG_LOG_PATH = Path("/app/.cursor/debug.log")
 
+# Debug logging configuration - disable by default to avoid any potential issues
+# Set ENABLE_DEBUG_LOGGING=true to enable file-based debug logging
+ENABLE_DEBUG_LOGGING = os.getenv("ENABLE_DEBUG_LOGGING", "false").lower() in ("true", "1", "yes")
+
+def _write_debug_log(session_id, run_id, hypothesis_id, location, message, data):
+    """Write debug log entry directly to file. Disabled by default via ENABLE_DEBUG_LOGGING env var."""
+    if not ENABLE_DEBUG_LOGGING:
+        return
+    try:
+        DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        import json
+        log_data = {
+            "sessionId": session_id,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(timezone.now().timestamp() * 1000)
+        }
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_data) + "\n")
+    except: pass
 
 def _audit(user, action, resource_type, resource_id, details=None):
   AuditLog.objects.create(
@@ -52,36 +76,23 @@ class RepositoryViewSet(viewsets.ModelViewSet):
   serializer_class = RepositorySerializer
 
   def list(self, request, *args, **kwargs):
-    import json
-    import urllib.request
-    import urllib.error
-    
     # #region agent log
-    try:
-      auth_header = request.META.get("HTTP_AUTHORIZATION", "")
-      log_data = {
-        "sessionId": "debug-session",
-        "runId": "api-request",
-        "hypothesisId": "F",
-        "location": "views.py:RepositoryViewSet.list",
-        "message": "Repository list request",
-        "data": {
-          "user_authenticated": request.user.is_authenticated,
-          "user": str(request.user) if request.user.is_authenticated else "anonymous",
-          "has_auth_header": bool(auth_header),
-          "auth_header_prefix": auth_header[:20] if auth_header else "",
-          "origin": request.META.get("HTTP_ORIGIN", ""),
-        },
-        "timestamp": int(timezone.now().timestamp() * 1000)
+    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+    _write_debug_log(
+      "debug-session",
+      "api-request",
+      "F",
+      "views.py:RepositoryViewSet.list",
+      "Repository list request",
+      {
+        "user_authenticated": request.user.is_authenticated,
+        "user": str(request.user) if request.user.is_authenticated else "anonymous",
+        "has_auth_header": bool(auth_header),
+        "auth_header_prefix": auth_header[:20] if auth_header else "",
+        "origin": request.META.get("HTTP_ORIGIN", ""),
       }
-      req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
-                                 data=json.dumps(log_data).encode('utf-8'),
-                                 headers={'Content-Type': 'application/json'},
-                                 method='POST')
-      urllib.request.urlopen(req, timeout=0.1).close()
-    except: pass
+    )
     # #endregion
-    
     return super().list(request, *args, **kwargs)
 
   def perform_create(self, serializer):
@@ -415,36 +426,23 @@ class AppViewSet(viewsets.ModelViewSet):
   serializer_class = AppSerializer
 
   def list(self, request, *args, **kwargs):
-    import json
-    import urllib.request
-    import urllib.error
-    
     # #region agent log
-    try:
-      auth_header = request.META.get("HTTP_AUTHORIZATION", "")
-      log_data = {
-        "sessionId": "debug-session",
-        "runId": "api-request",
-        "hypothesisId": "F",
-        "location": "views.py:AppViewSet.list",
-        "message": "App list request",
-        "data": {
-          "user_authenticated": request.user.is_authenticated,
-          "user": str(request.user) if request.user.is_authenticated else "anonymous",
-          "has_auth_header": bool(auth_header),
-          "auth_header_prefix": auth_header[:20] if auth_header else "",
-          "origin": request.META.get("HTTP_ORIGIN", ""),
-        },
-        "timestamp": int(timezone.now().timestamp() * 1000)
+    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+    _write_debug_log(
+      "debug-session",
+      "api-request",
+      "F",
+      "views.py:AppViewSet.list",
+      "App list request",
+      {
+        "user_authenticated": request.user.is_authenticated,
+        "user": str(request.user) if request.user.is_authenticated else "anonymous",
+        "has_auth_header": bool(auth_header),
+        "auth_header_prefix": auth_header[:20] if auth_header else "",
+        "origin": request.META.get("HTTP_ORIGIN", ""),
       }
-      req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
-                                 data=json.dumps(log_data).encode('utf-8'),
-                                 headers={'Content-Type': 'application/json'},
-                                 method='POST')
-      urllib.request.urlopen(req, timeout=0.1).close()
-    except: pass
+    )
     # #endregion
-    
     return super().list(request, *args, **kwargs)
 
   def perform_create(self, serializer):
@@ -508,22 +506,8 @@ class AppViewSet(viewsets.ModelViewSet):
     import urllib.error
     
     # #region agent log
-    try:
-      log_data = {
-        "sessionId": "debug-session",
-        "runId": "container-status",
-        "hypothesisId": "E",
-        "location": "views.py:container_status:439",
-        "message": "container_status called",
-        "data": {"app_id": pk, "user_authenticated": request.user.is_authenticated, "user": str(request.user) if request.user.is_authenticated else "anonymous"},
-        "timestamp": int(timezone.now().timestamp() * 1000)
-      }
-      req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
-                                 data=json.dumps(log_data).encode('utf-8'),
-                                 headers={'Content-Type': 'application/json'},
-                                 method='POST')
-      urllib.request.urlopen(req, timeout=0.1).close()
-    except: pass
+    _write_debug_log("debug-session", "container-status", "E", "views.py:container_status:439",
+                     "container_status called", {"app_id": pk, "user_authenticated": request.user.is_authenticated, "user": str(request.user) if request.user.is_authenticated else "anonymous"})
     # #endregion
     
     app = self.get_object()
@@ -547,22 +531,8 @@ class AppViewSet(viewsets.ModelViewSet):
     
     if not docker_cmd:
       # #region agent log
-      try:
-        log_data = {
-          "sessionId": "debug-session",
-          "runId": "container-status",
-          "hypothesisId": "E",
-          "location": "views.py:container_status:470",
-          "message": "Docker command not found in backend",
-          "data": {"app_id": pk, "cname": cname},
-          "timestamp": int(timezone.now().timestamp() * 1000)
-        }
-        req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
-                                   data=json.dumps(log_data).encode('utf-8'),
-                                   headers={'Content-Type': 'application/json'},
-                                   method='POST')
-        urllib.request.urlopen(req, timeout=0.1).close()
-      except: pass
+      _write_debug_log("debug-session", "container-status", "E", "views.py:container_status:470",
+                       "Docker command not found in backend", {"app_id": pk, "cname": cname})
       # #endregion
       return Response({"status": "unknown", "details": "Docker command not available in backend container"})
     
@@ -574,44 +544,16 @@ class AppViewSet(viewsets.ModelViewSet):
         timeout=5,
       )
       # #region agent log
-      try:
-        log_data = {
-          "sessionId": "debug-session",
-          "runId": "container-status",
-          "hypothesisId": "E",
-          "location": "views.py:container_status:490",
-          "message": "Docker ps result",
-          "data": {"returncode": result.returncode, "stdout": result.stdout[:100], "stderr": result.stderr[:100]},
-          "timestamp": int(timezone.now().timestamp() * 1000)
-        }
-        req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
-                                   data=json.dumps(log_data).encode('utf-8'),
-                                   headers={'Content-Type': 'application/json'},
-                                   method='POST')
-        urllib.request.urlopen(req, timeout=0.1).close()
-      except: pass
+      _write_debug_log("debug-session", "container-status", "E", "views.py:container_status:490",
+                       "Docker ps result", {"returncode": result.returncode, "stdout": result.stdout[:100], "stderr": result.stderr[:100]})
       # #endregion
       if result.returncode == 0 and result.stdout.strip():
         return Response({"status": "running", "details": result.stdout.strip()})
       return Response({"status": "stopped"})
     except Exception as e:
       # #region agent log
-      try:
-        log_data = {
-          "sessionId": "debug-session",
-          "runId": "container-status",
-          "hypothesisId": "E",
-          "location": "views.py:container_status:505",
-          "message": "Exception in container_status",
-          "data": {"error": str(e)[:200]},
-          "timestamp": int(timezone.now().timestamp() * 1000)
-        }
-        req = urllib.request.Request('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', 
-                                   data=json.dumps(log_data).encode('utf-8'),
-                                   headers={'Content-Type': 'application/json'},
-                                   method='POST')
-        urllib.request.urlopen(req, timeout=0.1).close()
-      except: pass
+      _write_debug_log("debug-session", "container-status", "E", "views.py:container_status:505",
+                       "Exception in container_status", {"error": str(e)[:200]})
       # #endregion
       return Response({"status": "error", "details": str(e)[:200]}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

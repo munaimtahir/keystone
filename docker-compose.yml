@@ -55,6 +55,7 @@ services:
     volumes:
       - ./platform/backend:/app
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./.cursor:/app/.cursor
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.backend.rule=PathPrefix(`/api`)"
@@ -79,6 +80,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./runtime/repos:/runtime/repos
       - ./runtime/logs:/runtime/logs
+      - ./.cursor:/app/.cursor
 
   frontend:
     build:
