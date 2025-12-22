@@ -35,7 +35,7 @@ Based on the error description:
 - Prevents unhandled exceptions when commands are not found
 
 ### 4. Fixed Status Bug
-- Changed `dep.status = "running"` to `dep.status = "deploying"` at line 87
+- Changed `dep.status = "running"` to `dep.status = "deploying"` at line 95
 - Now correctly shows "deploying" status when deployment starts
 - Matches the app status set in `views.py`
 
@@ -59,7 +59,7 @@ Based on the error description:
 
 1. `/workspace/platform/backend/runner.py`
    - Added `_check_docker_available()` function
-   - Fixed status bug (line 87)
+   - Fixed status bug (line 95)
    - Enhanced `run()` function error handling
    - Added early docker validation
    - Improved exception handling
