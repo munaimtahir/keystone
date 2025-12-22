@@ -32,7 +32,12 @@ def allocate_port(app: AppModel) -> int:
     raise RuntimeError("No ports available")
 
 def run(cmd, cwd=None):
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    try:
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as e:
+        # Create a mock result object for missing commands
+        result = subprocess.CompletedProcess(cmd, 1, "", f"Command not found: {cmd[0] if cmd else 'unknown'}. Error: {str(e)}")
+        return result
 
 def _container_name(app: AppModel) -> str:
     safe = app.name.replace(" ","_").lower()
@@ -64,13 +69,48 @@ def _health_check(port: int, path: str) -> bool:
         time.sleep(2)
     return False
 
+def _check_docker_available():
+    """Check if docker command is available."""
+    # Try 'docker' first
+    result = subprocess.run(["which", "docker"], capture_output=True, text=True)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    
+    # Try 'docker.io' (some Debian/Ubuntu installations)
+    result = subprocess.run(["which", "docker.io"], capture_output=True, text=True)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    
+    # Try common docker paths
+    for path in ["/usr/bin/docker", "/usr/bin/docker.io", "/usr/local/bin/docker"]:
+        if os.path.exists(path):
+            return path
+    
+    return None
+
 def deploy_one(dep: Deployment):
     app = dep.app
     repo = app.repo
 
-    dep.status = "running"
+    dep.status = "deploying"
     dep.started_at = timezone.now()
     dep.save(update_fields=["status","started_at"])
+    
+    # Check docker availability early
+    docker_cmd = _check_docker_available()
+    if not docker_cmd:
+        logp = LOGS_DIR / f"deploy_{dep.id}.log"
+        with open(logp, "w", encoding="utf-8") as f:
+            f.write("=== error ===\n")
+            f.write("Docker command not found. Please ensure docker is installed and in PATH.\n")
+        dep.logs_path = str(logp)
+        dep.status = "failed"
+        dep.error_summary = "Docker command not found. The runner cannot execute docker commands."
+        dep.ended_at = timezone.now()
+        dep.save(update_fields=["status", "error_summary", "ended_at", "logs_path"])
+        app.status = "failed"
+        app.save(update_fields=["status"])
+        return
 
     # Allocate/lock port in a transaction to avoid concurrent assignment.
     with transaction.atomic():
@@ -90,11 +130,11 @@ def deploy_one(dep: Deployment):
     # Rollback deployments skip git/build and just run the prior image tag.
     if getattr(dep, "deployment_type", "initial") == "rollback":
         tag = dep.image_tag
-        run(["docker","rm","-f",cname])
+        run([docker_cmd,"rm","-f",cname])
         env_flags = []
         for k, v in (app.env_vars or {}).items():
             env_flags.extend(["-e", f"{k}={v}"])
-        r3 = run(["docker","run","-d","--name",cname,"-p",f"{port}:{app.container_port}"] + env_flags + [tag])
+        r3 = run([docker_cmd,"run","-d","--name",cname,"-p",f"{port}:{app.container_port}"] + env_flags + [tag])
 
         with open(logp,"w",encoding="utf-8") as f:
             f.write("=== rollback ===\n")
@@ -141,13 +181,13 @@ def deploy_one(dep: Deployment):
             return
 
         tag = f"keystone/{safe}:{dep.id}"
-        r2 = run(["docker","build","-t",tag,"."], cwd=str(workdir))
+        r2 = run([docker_cmd,"build","-t",tag,"."], cwd=str(workdir))
 
-        run(["docker","rm","-f",cname])
+        run([docker_cmd,"rm","-f",cname])
         env_flags = []
         for k, v in (app.env_vars or {}).items():
             env_flags.extend(["-e", f"{k}={v}"])
-        r3 = run(["docker","run","-d","--name",cname,"-p",f"{port}:{app.container_port}"] + env_flags + [tag])
+        r3 = run([docker_cmd,"run","-d","--name",cname,"-p",f"{port}:{app.container_port}"] + env_flags + [tag])
 
         with open(logp,"w",encoding="utf-8") as f:
             f.write("=== git ===\n"+r.stdout+r.stderr+"\n")
@@ -158,11 +198,17 @@ def deploy_one(dep: Deployment):
         if r2.returncode != 0:
             dep.status="failed"
             build_error = r2.stderr.strip() or r2.stdout.strip() or "unknown build error"
+            # Check for common docker errors
+            if "Cannot connect to the Docker daemon" in build_error or "permission denied" in build_error.lower():
+                build_error = f"Docker daemon connection issue: {build_error[:150]}"
             dep.error_summary=f"Docker build failed: {build_error[:200]}"
             app.status="failed"
         elif r3.returncode != 0:
             dep.status="failed"
             run_error = r3.stderr.strip() or r3.stdout.strip() or "unknown run error"
+            # Check for common docker errors
+            if "Cannot connect to the Docker daemon" in run_error or "permission denied" in run_error.lower():
+                run_error = f"Docker daemon connection issue: {run_error[:150]}"
             dep.error_summary=f"Docker run failed: {run_error[:200]}"
             app.status="failed"
         elif not _health_check(port, app.health_check_path):
@@ -192,19 +238,25 @@ def main():
             error_details = str(e)
             error_traceback = traceback.format_exc()
             
-            # Write error to log file if deployment exists
+            # Always write error to log file if deployment exists
             if dep and dep.id:
                 logp = LOGS_DIR / f"deploy_{dep.id}.log"
                 try:
-                    with open(logp, "w", encoding="utf-8") as f:
-                        f.write("=== exception ===\n")
+                    # Ensure log file exists, append if it does
+                    mode = "a" if logp.exists() else "w"
+                    with open(logp, mode, encoding="utf-8") as f:
+                        if mode == "w":
+                            f.write("=== exception ===\n")
+                        else:
+                            f.write("\n=== exception ===\n")
                         f.write(error_traceback + "\n")
                     dep.logs_path = str(logp)
-                except Exception:
-                    pass  # Don't fail if we can't write logs
+                except Exception as log_error:
+                    # If we can't write logs, at least try to save the error
+                    print(f"Failed to write log file: {log_error}")
             
             dep.status = "failed"
-            dep.error_summary = f"Deployment failed: {error_details}"
+            dep.error_summary = f"Deployment failed: {error_details[:500]}"
             dep.ended_at = timezone.now()
             dep.save(update_fields=["status", "error_summary", "ended_at", "logs_path"])
             dep.app.status = "failed"
