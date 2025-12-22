@@ -91,9 +91,57 @@ function App() {
     }
     if (token) headers.set("Authorization", `Token ${token}`)
     const fetchUrl = `${api}${path}`
+    
+    // #region agent log
+    try {
+      fetch('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          sessionId: 'debug-session',
+          runId: 'api-fetch',
+          hypothesisId: 'F',
+          location: 'main.jsx:apiFetch',
+          message: 'API fetch request',
+          data: {
+            path: path,
+            url: fetchUrl,
+            hasToken: !!token,
+            tokenPrefix: token ? token.substring(0, 10) + '...' : 'none',
+            method: opts.method || 'GET',
+          },
+          timestamp: Date.now()
+        })
+      }).catch(() => {})
+    } catch {}
+    // #endregion
+    
     let res;
     try {
       res = await fetch(fetchUrl, { ...opts, headers })
+      
+      // #region agent log
+      try {
+        fetch('http://localhost:7253/ingest/b43efa04-b0ac-48de-ba53-3dfd4466ed70', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            sessionId: 'debug-session',
+            runId: 'api-fetch',
+            hypothesisId: 'F',
+            location: 'main.jsx:apiFetch:response',
+            message: 'API fetch response',
+            data: {
+              path: path,
+              status: res.status,
+              statusText: res.statusText,
+              ok: res.ok,
+            },
+            timestamp: Date.now()
+          })
+        }).catch(() => {})
+      } catch {}
+      // #endregion
     } catch (fetchError) {
       throw fetchError
     }

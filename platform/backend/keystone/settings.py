@@ -69,9 +69,10 @@ REST_FRAMEWORK = {
 _cors = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
 if _cors:
     CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()]
+    CORS_ALLOW_ALL_ORIGINS = False
 else:
     # In development/DEBUG mode, allow all origins for flexibility
     # In production, set CORS_ALLOWED_ORIGINS env var with specific origins
-    CORS_ALLOWED_ORIGINS = []
-    CORS_ALLOW_ALL_ORIGINS = DEBUG
+    CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_HEADERS = ["content-type", "authorization", "accept"]
