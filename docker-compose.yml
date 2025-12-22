@@ -26,6 +26,11 @@ services:
       PORT_RANGE_START: ${PORT_RANGE_START}
       PORT_RANGE_END: ${PORT_RANGE_END}
       DJANGO_FORCE_SCRIPT_NAME: ${DJANGO_FORCE_SCRIPT_NAME:-}
+      KEYSTONE_ADMIN_USERNAME: ${KEYSTONE_ADMIN_USERNAME:-admin}
+      KEYSTONE_ADMIN_PASSWORD: ${KEYSTONE_ADMIN_PASSWORD:-admin}
+      KEYSTONE_ADMIN_EMAIL: ${KEYSTONE_ADMIN_EMAIL:-admin@example.com}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      KEYSTONE_FERNET_KEY: ${KEYSTONE_FERNET_KEY:-}
     depends_on:
       db:
         condition: service_healthy
@@ -34,6 +39,7 @@ services:
     networks: [platform]
     volumes:
       - ./platform/backend:/app
+      - /var/run/docker.sock:/var/run/docker.sock
 
   runner:
     build:
