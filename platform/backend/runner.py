@@ -77,7 +77,7 @@ def _check_docker_available():
         result = subprocess.run(["which", "docker"], capture_output=True, text=True)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except Exception:
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
         pass
     
     try:
@@ -85,7 +85,7 @@ def _check_docker_available():
         result = subprocess.run(["which", "docker.io"], capture_output=True, text=True)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except Exception:
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
         pass
     
     # Try common docker paths
@@ -272,7 +272,7 @@ def main():
             if len(error_summary_details) > max_error_length:
                 truncated = error_summary_details[:max_error_length]
                 last_space = truncated.rfind(" ")
-                if last_space > 0:
+                if last_space != -1:
                     truncated = truncated[:last_space]
                 error_summary_details = truncated.rstrip() + "..."
             dep.error_summary = f"Deployment failed: {error_summary_details}"
