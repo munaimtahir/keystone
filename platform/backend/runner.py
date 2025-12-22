@@ -273,13 +273,14 @@ def main():
                 truncated = error_summary_details[:max_error_length]
                 last_space = truncated.rfind(" ")
                 if last_space != -1:
-                    truncated = truncated[:last_space]
-                error_summary_details = truncated.rstrip() + "..."
+                    error_summary_details = truncated[:last_space].rstrip() + "..."
+                else:
+                    error_summary_details = truncated.rstrip() + "..."
             dep.error_summary = f"Deployment failed: {error_summary_details}"
             dep.ended_at = timezone.now()
             dep.save(update_fields=["status", "error_summary", "ended_at", "logs_path"])
             # Safety check for dep.app accessibility
-            if hasattr(dep, 'app') and dep.app is not None:
+            if dep.app is not None:
                 dep.app.status = "failed"
                 dep.app.save(update_fields=["status"])
         time.sleep(1)
