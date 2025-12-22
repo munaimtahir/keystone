@@ -1,78 +1,139 @@
-from pathlib import Path
+"""
+Keystone Django Settings
+
+A self-hosted deployment control panel for VPS.
+See docs/PURPOSE.md for project overview.
+"""
 import os
+from pathlib import Path
+
 import dj_database_url
 
+# =============================================================================
+# Core Settings
+# =============================================================================
 BASE_DIR = Path(__file__).resolve().parent.parent
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY","dev-secret")
-DEBUG = os.getenv("DJANGO_DEBUG","0") == "1"
-ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS","*").split(",")
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret-change-in-production")
+DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",") if h.strip()]
 
+# =============================================================================
+# Application Definition
+# =============================================================================
 INSTALLED_APPS = [
-  "django.contrib.admin","django.contrib.auth","django.contrib.contenttypes",
-  "django.contrib.sessions","django.contrib.messages","django.contrib.staticfiles",
-  "corsheaders",
-  "rest_framework",
-  "rest_framework.authtoken",
-  "api",
+    # Django core
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    # Third party
+    "corsheaders",
+    "rest_framework",
+    "rest_framework.authtoken",
+    # Local
+    "api",
 ]
 
 MIDDLEWARE = [
-  "django.middleware.security.SecurityMiddleware",
-  "whitenoise.middleware.WhiteNoiseMiddleware",
-  "corsheaders.middleware.CorsMiddleware",
-  "django.contrib.sessions.middleware.SessionMiddleware",
-  "django.middleware.common.CommonMiddleware",
-  "django.middleware.csrf.CsrfViewMiddleware",
-  "django.contrib.auth.middleware.AuthenticationMiddleware",
-  "django.contrib.messages.middleware.MessageMiddleware",
-  "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 ROOT_URLCONF = "keystone.urls"
-TEMPLATES = [{
-  "BACKEND":"django.template.backends.django.DjangoTemplates",
-  "DIRS":[], "APP_DIRS":True,
-  "OPTIONS":{"context_processors":[
-    "django.template.context_processors.request",
-    "django.contrib.auth.context_processors.auth",
-    "django.contrib.messages.context_processors.messages",
-  ]},
-}]
 WSGI_APPLICATION = "keystone.wsgi.application"
-DATABASES = {"default": dj_database_url.config(default=os.getenv("DATABASE_URL","sqlite:///db.sqlite3"))}
-AUTH_PASSWORD_VALIDATORS = []
-LANGUAGE_CODE="en-us"
-TIME_ZONE="Asia/Karachi"
-USE_I18N=True
-USE_TZ=True
 
-# Subpath deployment support
-FORCE_SCRIPT_NAME = os.getenv("DJANGO_FORCE_SCRIPT_NAME", "")
-STATIC_URL = f"{FORCE_SCRIPT_NAME}/static/" if FORCE_SCRIPT_NAME else "static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"
+# =============================================================================
+# Templates
+# =============================================================================
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
+            ],
+        },
+    },
+]
 
-DEFAULT_AUTO_FIELD="django.db.models.BigAutoField"
-
-# DRF: require auth by default (UI + API protected) and support token auth for SPA.
-REST_FRAMEWORK = {
-  "DEFAULT_AUTHENTICATION_CLASSES": [
-    "rest_framework.authentication.SessionAuthentication",
-    "rest_framework.authentication.TokenAuthentication",
-  ],
-  "DEFAULT_PERMISSION_CLASSES": [
-    "rest_framework.permissions.IsAuthenticated",
-  ],
+# =============================================================================
+# Database (PostgreSQL with SQLite fallback for development)
+# =============================================================================
+DATABASES = {
+    "default": dj_database_url.config(
+        default=os.getenv("DATABASE_URL", "sqlite:///db.sqlite3")
+    )
 }
 
-# CORS for the panel (served on :8080) to call API on :8000 in IP-mode MVP.
-# Allow all origins in development, or specific origins in production
-_cors = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
-if _cors:
-    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()]
+# =============================================================================
+# Internationalization
+# =============================================================================
+LANGUAGE_CODE = "en-us"
+TIME_ZONE = "UTC"
+USE_I18N = True
+USE_TZ = True
+
+# =============================================================================
+# Static Files
+# =============================================================================
+FORCE_SCRIPT_NAME = os.getenv("DJANGO_FORCE_SCRIPT_NAME", "") or None
+STATIC_URL = f"{FORCE_SCRIPT_NAME or ''}/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# =============================================================================
+# Default Auto Field
+# =============================================================================
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# =============================================================================
+# Django REST Framework Configuration
+# =============================================================================
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+        "rest_framework.authentication.TokenAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+}
+
+# =============================================================================
+# CORS Configuration
+# See docs/SECURITY_MODEL.md - Keystone UI protected by authentication
+# =============================================================================
+_cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+if _cors_origins:
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(",") if o.strip()]
     CORS_ALLOW_ALL_ORIGINS = False
 else:
-    # In development/DEBUG mode, allow all origins for flexibility
-    # In production, set CORS_ALLOWED_ORIGINS env var with specific origins
+    # Development mode: allow all origins
     CORS_ALLOW_ALL_ORIGINS = True
+
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = ["content-type", "authorization", "accept"]
+
+# =============================================================================
+# Password Validation (disabled for simplicity in single-tenant mode)
+# =============================================================================
+AUTH_PASSWORD_VALIDATORS = []
+
+# =============================================================================
+# Keystone-specific Configuration
+# =============================================================================
+# Port range for deployed applications (see docs/AGENT.md)
+PORT_RANGE_START = int(os.getenv("PORT_RANGE_START", "9000"))
+PORT_RANGE_END = int(os.getenv("PORT_RANGE_END", "9999"))

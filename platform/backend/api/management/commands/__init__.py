@@ -1,3 +1,1 @@
-# Required for Django management commands package discovery.
-
-
+# Management commands
