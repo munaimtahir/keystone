@@ -4,7 +4,6 @@ import django
 import urllib.request
 import urllib.error
 from urllib.parse import quote
-import traceback
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "keystone.settings")
 django.setup()
@@ -72,23 +71,15 @@ def _health_check(port: int, path: str) -> bool:
 
 def _check_docker_available():
     """Check if docker command is available."""
-    try:
-        # Try 'docker' first
-        result = subprocess.run(["which", "docker"], capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (FileNotFoundError, OSError):
-        # Command 'which' not found or other OS-level errors - continue to fallback methods
-        pass
+    # Try 'docker' first
+    result = subprocess.run(["which", "docker"], capture_output=True, text=True)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
     
-    try:
-        # Try 'docker.io' (some Debian/Ubuntu installations)
-        result = subprocess.run(["which", "docker.io"], capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (FileNotFoundError, OSError):
-        # Command 'which' not found or other OS-level errors - continue to fallback methods
-        pass
+    # Try 'docker.io' (some Debian/Ubuntu installations)
+    result = subprocess.run(["which", "docker.io"], capture_output=True, text=True)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
     
     # Try common docker paths
     for path in ["/usr/bin/docker", "/usr/bin/docker.io", "/usr/local/bin/docker"]:
@@ -96,19 +87,6 @@ def _check_docker_available():
             return path
     
     return None
-
-def _truncate_error(error_msg: str, max_length: int = 500) -> str:
-    """Truncate error message at word boundary to avoid cutting mid-word."""
-    if len(error_msg) <= max_length:
-        return error_msg
-    
-    truncated = error_msg[:max_length]
-    last_space = truncated.rfind(" ")
-    # Only use a space as a truncation point if it is not the very first character
-    if last_space > 0:
-        return truncated[:last_space].rstrip() + "..."
-    else:
-        return truncated.rstrip() + "..."
 
 def deploy_one(dep: Deployment):
     app = dep.app
@@ -220,22 +198,18 @@ def deploy_one(dep: Deployment):
         if r2.returncode != 0:
             dep.status="failed"
             build_error = r2.stderr.strip() or r2.stdout.strip() or "unknown build error"
-            # Check for common docker errors and provide appropriate prefix
+            # Check for common docker errors
             if "Cannot connect to the Docker daemon" in build_error or "permission denied" in build_error.lower():
-                error_summary = f"Docker daemon error: {_truncate_error(build_error, 150)}"
-            else:
-                error_summary = f"Docker build failed: {_truncate_error(build_error, 200)}"
-            dep.error_summary = error_summary
+                build_error = f"Docker daemon connection issue: {build_error[:150]}"
+            dep.error_summary=f"Docker build failed: {build_error[:200]}"
             app.status="failed"
         elif r3.returncode != 0:
             dep.status="failed"
             run_error = r3.stderr.strip() or r3.stdout.strip() or "unknown run error"
-            # Check for common docker errors and provide appropriate prefix
+            # Check for common docker errors
             if "Cannot connect to the Docker daemon" in run_error or "permission denied" in run_error.lower():
-                error_summary = f"Docker daemon error: {_truncate_error(run_error, 150)}"
-            else:
-                error_summary = f"Docker run failed: {_truncate_error(run_error, 200)}"
-            dep.error_summary = error_summary
+                run_error = f"Docker daemon connection issue: {run_error[:150]}"
+            dep.error_summary=f"Docker run failed: {run_error[:200]}"
             app.status="failed"
         elif not _health_check(port, app.health_check_path):
             dep.status="failed"
@@ -260,6 +234,7 @@ def main():
         try:
             deploy_one(dep)
         except Exception as e:
+            import traceback
             error_details = str(e)
             error_traceback = traceback.format_exc()
             
@@ -281,13 +256,11 @@ def main():
                     print(f"Failed to write log file: {log_error}")
             
             dep.status = "failed"
-            dep.error_summary = f"Deployment failed: {_truncate_error(error_details, 500)}"
+            dep.error_summary = f"Deployment failed: {error_details[:500]}"
             dep.ended_at = timezone.now()
             dep.save(update_fields=["status", "error_summary", "ended_at", "logs_path"])
-            # Safety check for dep.app accessibility
-            if dep.app is not None:
-                dep.app.status = "failed"
-                dep.app.save(update_fields=["status"])
+            dep.app.status = "failed"
+            dep.app.save(update_fields=["status"])
         time.sleep(1)
 
 if __name__ == "__main__":
