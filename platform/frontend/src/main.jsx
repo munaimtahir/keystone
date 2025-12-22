@@ -81,6 +81,7 @@ function App() {
   const [historyApp, setHistoryApp] = React.useState(null)
   const [history, setHistory] = React.useState([])
   const [logsModal, setLogsModal] = React.useState(null) // {deployment, logs}
+  const [inspectionModal, setInspectionModal] = React.useState(null) // {repo, details, loading}
 
   async function apiFetch(path, opts = {}) {
     const headers = new Headers(opts.headers || {})
@@ -297,6 +298,43 @@ function App() {
     }
   }
 
+  async function inspectRepo(repo) {
+    setError("")
+    setInfo("")
+    setInspectionModal({ repo, details: repo.inspection_details ? { status: repo.inspection_status, details: repo.inspection_details } : null, loading: true })
+    try {
+      const data = await apiFetch(`/api/repos/${repo.id}/inspect/`, { method: "POST" })
+      setInspectionModal({ repo: {...repo, inspection_status: data.status, inspection_details: data.details}, details: data, loading: false })
+      await load()
+      setInfo("Repository inspected successfully.")
+    } catch (e) {
+      setInspectionModal({ repo, details: null, loading: false, error: e.message })
+      setError(e.message)
+    }
+  }
+
+  async function prepareRepo(repo) {
+    setError("")
+    setInfo("")
+    setLoading(true)
+    try {
+      const data = await apiFetch(`/api/repos/${repo.id}/prepare/`, { method: "POST" })
+      await load()
+      // Update modal with prepared status
+      const updatedRepo = {...repo, prepared_for_deployment: true, deployment_config: data.config}
+      setInspectionModal({ 
+        repo: updatedRepo, 
+        details: { status: "prepared", config: data.config, message: data.message },
+        loading: false 
+      })
+      setInfo("Repository prepared for deployment successfully.")
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   if (!token) {
     return (
       <div style={{fontFamily:"system-ui", padding:20, maxWidth:520, margin:"40px auto"}}>
@@ -358,8 +396,40 @@ function App() {
             <input placeholder="GitHub PAT (optional, stored encrypted)" type="password" value={newRepo.github_token} onChange={e=>setNewRepo({...newRepo, github_token:e.target.value})} />
             <button disabled={loading}>Add Repo</button>
           </form>
-          <ul>
-            {repos.map(r => <li key={r.id}><b>{r.name}</b> — {r.git_url}</li>)}
+          <ul style={{listStyle:"none", padding:0, marginTop:12}}>
+            {repos.map(r => (
+              <li key={r.id} style={{padding:"8px 0", borderBottom:"1px solid #f0f0f0", display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                <div>
+                  <b>{r.name}</b> — {r.git_url}
+                  <div style={{fontSize:12, opacity:.7, marginTop:4}}>
+                    Status: {r.inspection_status || "pending"} 
+                    {r.prepared_for_deployment && <span style={{color:"#059669", fontWeight:"bold"}}> • Prepared</span>}
+                  </div>
+                </div>
+                <div style={{display:"flex", gap:4}}>
+                  {r.inspection_status === "ready" && r.inspection_details && (
+                    <button 
+                      onClick={() => setInspectionModal({ 
+                        repo: r, 
+                        details: { status: r.inspection_status, details: r.inspection_details },
+                        loading: false 
+                      })} 
+                      disabled={loading}
+                      style={{padding:"4px 8px", fontSize:12}}
+                    >
+                      View Details
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => inspectRepo(r)} 
+                    disabled={loading || r.inspection_status === "inspecting"}
+                    style={{padding:"4px 8px", fontSize:12}}
+                  >
+                    {r.inspection_status === "inspecting" ? "Inspecting..." : r.inspection_status === "ready" ? "Re-inspect" : "Inspect & Prepare"}
+                  </button>
+                </div>
+              </li>
+            ))}
           </ul>
         </div>
 
@@ -409,10 +479,20 @@ function App() {
                   <td>{a.status}</td>
                   <td>{a.current_port || "-"}</td>
                   <td style={{display:"flex", gap:8, flexWrap:"wrap"}}>
-                    <button onClick={()=>triggerDeploy(a.id, "deploy")} disabled={loading || isDeploying(a)}>
+                    <button 
+                      onClick={()=>triggerDeploy(a.id, "deploy")} 
+                      disabled={loading || isDeploying(a) || !a.repo_prepared_for_deployment}
+                      title={!a.repo_prepared_for_deployment ? "Repository must be prepared before deployment" : ""}
+                    >
                       {isDeploying(a) ? "Deploying…" : "Deploy"}
                     </button>
-                    <button onClick={()=>triggerDeploy(a.id, "update")} disabled={loading || isDeploying(a)}>Update</button>
+                    <button 
+                      onClick={()=>triggerDeploy(a.id, "update")} 
+                      disabled={loading || isDeploying(a) || !a.repo_prepared_for_deployment}
+                      title={!a.repo_prepared_for_deployment ? "Repository must be prepared before deployment" : ""}
+                    >
+                      Update
+                    </button>
                     <button onClick={()=>triggerDeploy(a.id, "rollback")} disabled={loading || isDeploying(a)}>Rollback</button>
                     <button onClick={()=>openHistory(a)} disabled={loading}>History</button>
                     <button onClick={()=>checkContainerStatus(a)} disabled={loading}>Check Status</button>
@@ -484,6 +564,106 @@ function App() {
           }}>
             {logsModal.logs || "(empty)"}
           </pre>
+        </Modal>
+      )}
+
+      {inspectionModal && (
+        <Modal title={`Inspect & Prepare — ${inspectionModal.repo.name}`} onClose={()=>setInspectionModal(null)} width={980}>
+          {inspectionModal.loading ? (
+            <div style={{textAlign:"center", padding:40}}>Inspecting repository...</div>
+          ) : inspectionModal.error ? (
+            <div style={{background:"#fff1f2", border:"1px solid #fecdd3", color:"#9f1239", padding:12, borderRadius:8}}>
+              <strong>Error:</strong> {inspectionModal.error}
+            </div>
+          ) : inspectionModal.details ? (
+            <div style={{display:"grid", gap:16}}>
+              <div style={{background:"#eff6ff", border:"1px solid #bfdbfe", color:"#1e40af", padding:12, borderRadius:8}}>
+                <strong>Status:</strong> {inspectionModal.details.status}<br/>
+                {inspectionModal.details.message && <div style={{marginTop:8}}>{inspectionModal.details.message}</div>}
+              </div>
+
+              {inspectionModal.details.details && (
+                <>
+                  {inspectionModal.details.details.compose_files_found && inspectionModal.details.details.compose_files_found.length > 0 && (
+                    <div>
+                      <strong>Docker Compose Files Found:</strong>
+                      <ul>
+                        {inspectionModal.details.details.compose_files_found.map((f, i) => <li key={i}>{f}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
+                  {inspectionModal.details.details.main_service && (
+                    <div>
+                      <strong>Main Service:</strong> {inspectionModal.details.details.main_service}
+                    </div>
+                  )}
+
+                  {inspectionModal.details.details.services && Object.keys(inspectionModal.details.details.services).length > 0 && (
+                    <div>
+                      <strong>Services Detected:</strong>
+                      <ul>
+                        {Object.keys(inspectionModal.details.details.services).map(svc => (
+                          <li key={svc}>
+                            <strong>{svc}</strong>
+                            {inspectionModal.details.details.services[svc].build && " (has build)"}
+                            {inspectionModal.details.details.services[svc].image && ` (image: ${inspectionModal.details.details.services[svc].image})`}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {inspectionModal.details.details.issues && inspectionModal.details.details.issues.length > 0 && (
+                    <div>
+                      <strong style={{color:"#dc2626"}}>Issues Found:</strong>
+                      <ul style={{color:"#dc2626"}}>
+                        {inspectionModal.details.details.issues.map((issue, i) => <li key={i}>{issue}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
+                  {inspectionModal.details.details.recommendations && inspectionModal.details.details.recommendations.length > 0 && (
+                    <div>
+                      <strong style={{color:"#059669"}}>Recommendations:</strong>
+                      <ul style={{color:"#059669"}}>
+                        {inspectionModal.details.details.recommendations.map((rec, i) => <li key={i}>{rec}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
+                  {(inspectionModal.repo.prepared_for_deployment || inspectionModal.details.status === "prepared") ? (
+                    <div style={{background:"#d1fae5", border:"1px solid #6ee7b7", color:"#065f46", padding:12, borderRadius:8}}>
+                      <strong>✓ Repository is prepared for deployment</strong>
+                      {inspectionModal.details.config && (
+                        <div style={{marginTop:8, fontSize:12}}>
+                          <strong>Configuration:</strong>
+                          <pre style={{background:"#f0fdf4", padding:8, borderRadius:4, marginTop:4, fontSize:11, overflow:"auto"}}>
+                            {JSON.stringify(inspectionModal.details.config, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{marginTop:16}}>
+                      <button 
+                        onClick={() => prepareRepo(inspectionModal.repo)} 
+                        disabled={loading || (inspectionModal.details.status !== "ready" && inspectionModal.details.status !== "prepared")}
+                        style={{padding:"8px 16px", background:"#059669", color:"white", border:"none", borderRadius:6, cursor:"pointer"}}
+                      >
+                        {loading ? "Preparing..." : "Prepare for Deployment"}
+                      </button>
+                      <div style={{fontSize:12, opacity:.7, marginTop:8}}>
+                        This will standardize docker-compose.yml, add Traefik labels, and configure networks.
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          ) : (
+            <div>No inspection data available.</div>
+          )}
         </Modal>
       )}
     </div>

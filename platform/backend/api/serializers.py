@@ -9,6 +9,7 @@ class RepositorySerializer(serializers.ModelSerializer):
 
 class AppSerializer(serializers.ModelSerializer):
   repo_name = serializers.CharField(source="repo.name", read_only=True)
+  repo_prepared_for_deployment = serializers.BooleanField(source="repo.prepared_for_deployment", read_only=True)
   class Meta:
     model = App
     fields = "__all__"
