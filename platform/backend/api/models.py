@@ -1,53 +1,71 @@
+"""
+Keystone Models - Simple VPS Deployment
+
+3-step workflow:
+1. Import Repo - Add GitHub URL
+2. Prepare - Configure for Traefik
+3. Deploy - Run the app
+"""
 from django.db import models
-from django.conf import settings
 
-from .encrypted_fields import EncryptedTextField
-
-class Repository(models.Model):
-    name = models.CharField(max_length=120)
-    git_url = models.URLField()
-    default_branch = models.CharField(max_length=120, default="main")
-    github_token = EncryptedTextField(blank=True, default="", help_text="GitHub PAT for private repos (encrypted at rest)")
-    prepared_for_deployment = models.BooleanField(default=False, help_text="Whether repo has been inspected and prepared for deployment")
-    deployment_config = models.JSONField(default=dict, blank=True, help_text="Standardized deployment configuration")
-    inspection_status = models.CharField(max_length=20, default="pending", choices=[("pending", "Pending"), ("inspecting", "Inspecting"), ("ready", "Ready"), ("failed", "Failed")])
-    inspection_details = models.JSONField(default=dict, blank=True, help_text="Details from inspection process")
-    last_inspected_at = models.DateTimeField(null=True, blank=True)
-    def __str__(self): return self.name
 
 class App(models.Model):
-    ACCESS_MODES = [("PORT","PORT"),("HOST","HOST")]
-    name = models.CharField(max_length=120, unique=True)
-    repo = models.ForeignKey(Repository, on_delete=models.CASCADE, related_name="apps")
-    access_mode = models.CharField(max_length=10, choices=ACCESS_MODES, default="PORT")
-    current_port = models.IntegerField(null=True, blank=True)
-    container_port = models.IntegerField(default=8000, help_text="Port the container exposes")
-    health_check_path = models.CharField(max_length=200, blank=True, default="", help_text="Optional health check path (e.g., /health)")
-    env_vars = models.JSONField(default=dict, blank=True, help_text="Environment variables for container")
-    status = models.CharField(max_length=20, default="draft")
-    def __str__(self): return self.name
+    """An application to deploy from GitHub."""
+    
+    STATUS_CHOICES = [
+        ("imported", "Imported"),
+        ("preparing", "Preparing"),
+        ("prepared", "Prepared"),
+        ("deploying", "Deploying"),
+        ("running", "Running"),
+        ("stopped", "Stopped"),
+        ("failed", "Failed"),
+    ]
+    
+    # Basic info
+    name = models.CharField(max_length=100, unique=True, help_text="Unique app name (used in URL path)")
+    git_url = models.URLField(help_text="GitHub repository URL")
+    branch = models.CharField(max_length=100, default="main")
+    
+    # Status
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="imported")
+    error_message = models.TextField(blank=True, default="")
+    
+    # Deployment config (set during prepare)
+    container_port = models.IntegerField(default=8000, help_text="Port the app listens on inside container")
+    env_vars = models.JSONField(default=dict, blank=True, help_text="Environment variables")
+    
+    # Traefik routing (set during prepare)
+    traefik_rule = models.CharField(max_length=500, blank=True, default="")
+    
+    # Runtime info
+    container_id = models.CharField(max_length=100, blank=True, default="")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"{self.name} ({self.status})"
+    
+    @property
+    def slug(self):
+        """URL-safe name for routing."""
+        return self.name.lower().replace(" ", "-").replace("_", "-")
+
 
 class Deployment(models.Model):
-    DEPLOYMENT_TYPES = [("initial", "Initial"), ("update", "Update"), ("rollback", "Rollback")]
+    """Deployment history for an app."""
+    
     app = models.ForeignKey(App, on_delete=models.CASCADE, related_name="deployments")
-    status = models.CharField(max_length=20, default="queued")
-    deployment_type = models.CharField(max_length=20, choices=DEPLOYMENT_TYPES, default="initial")
-    image_tag = models.CharField(max_length=200, blank=True, default="")
-    assigned_port = models.IntegerField(null=True, blank=True)
+    status = models.CharField(max_length=20, default="pending")
+    logs = models.TextField(blank=True, default="")
+    error = models.TextField(blank=True, default="")
+    
     created_at = models.DateTimeField(auto_now_add=True)
-    started_at = models.DateTimeField(null=True, blank=True)
-    ended_at = models.DateTimeField(null=True, blank=True)
-    error_summary = models.TextField(blank=True, default="")
-    logs_path = models.CharField(max_length=255, blank=True, default="")
-
-
-class AuditLog(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
-    action = models.CharField(max_length=50)
-    resource_type = models.CharField(max_length=50)
-    resource_id = models.IntegerField()
-    timestamp = models.DateTimeField(auto_now_add=True)
-    details = models.JSONField(default=dict, blank=True)
-
+    finished_at = models.DateTimeField(null=True, blank=True)
+    
     class Meta:
-        ordering = ["-timestamp", "-id"]
+        ordering = ["-created_at"]
+    
+    def __str__(self):
+        return f"{self.app.name} - {self.status} - {self.created_at}"

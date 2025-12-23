@@ -1,105 +1,135 @@
+# Keystone - VPS Deployment Control Panel
+# 
+# Usage:
+#   1. Copy env.example to .env and configure
+#   2. Run: docker compose up -d
+#   3. Access panel at http://YOUR_VPS_IP
+#
+# Architecture:
+#   - Traefik: Reverse proxy (port 80)
+#   - Frontend: React UI (served by nginx)
+#   - Backend: Django API
+#   - Database: PostgreSQL
+
 services:
+  # ==========================================================================
+  # Traefik - Reverse Proxy & Load Balancer
+  # Routes traffic to Keystone and deployed apps
+  # ==========================================================================
   traefik:
-    image: traefik:v2.11
+    image: traefik:v3.2
+    container_name: keystone-traefik
+    restart: unless-stopped
     command:
+      # API and Dashboard
+      - --api.dashboard=true
       - --api.insecure=true
+      # Docker provider
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=keystone_web
+      # Entrypoints
       - --entrypoints.web.address=:80
+      # Logging
+      - --log.level=INFO
     ports:
       - "80:80"
-      - "8080:8080"  # Traefik dashboard (can be removed in production)
+      - "8080:8080"  # Traefik dashboard
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks: [platform]
-    depends_on:
-      - backend
-      - frontend
+    networks:
+      - keystone_web
+      - keystone_internal
 
+  # ==========================================================================
+  # PostgreSQL Database
+  # ==========================================================================
   db:
     image: postgres:16-alpine
+    container_name: keystone-db
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-keystone}
+      POSTGRES_USER: ${POSTGRES_USER:-keystone}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-keystone}
     volumes:
       - pgdata:/var/lib/postgresql/data
-    networks: [platform]
+    networks:
+      - keystone_internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-keystone} -d ${POSTGRES_DB:-keystone}"]
+      interval: 5s
       timeout: 5s
       retries: 10
 
+  # ==========================================================================
+  # Keystone Backend - Django API
+  # ==========================================================================
   backend:
     build:
       context: ./platform/backend
+    container_name: keystone-backend
+    restart: unless-stopped
     environment:
-      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
-      DJANGO_DEBUG: ${DJANGO_DEBUG}
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS}
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      RUNNER_SHARED_TOKEN: ${RUNNER_SHARED_TOKEN}
-      PORT_RANGE_START: ${PORT_RANGE_START}
-      PORT_RANGE_END: ${PORT_RANGE_END}
-      DJANGO_FORCE_SCRIPT_NAME: ${DJANGO_FORCE_SCRIPT_NAME:-}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
+      DATABASE_URL: postgres://${POSTGRES_USER:-keystone}:${POSTGRES_PASSWORD:-keystone}@db:5432/${POSTGRES_DB:-keystone}
       KEYSTONE_ADMIN_USERNAME: ${KEYSTONE_ADMIN_USERNAME:-admin}
       KEYSTONE_ADMIN_PASSWORD: ${KEYSTONE_ADMIN_PASSWORD:-admin}
-      KEYSTONE_ADMIN_EMAIL: ${KEYSTONE_ADMIN_EMAIL:-admin@example.com}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
-      KEYSTONE_FERNET_KEY: ${KEYSTONE_FERNET_KEY:-}
-    depends_on:
-      db:
-        condition: service_healthy
-    networks: [platform]
     volumes:
-      - ./platform/backend:/app
+      # Mount Docker socket so backend can manage containers
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./.cursor:/app/.cursor
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.backend.rule=PathPrefix(`/api`)"
-      - "traefik.http.routers.backend.entrypoints=web"
-      - "traefik.http.routers.backend.priority=10"
-      - "traefik.http.services.backend.loadbalancer.server.port=8000"
-
-  runner:
-    build:
-      context: ./platform/backend
-      dockerfile: Dockerfile.runner
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      RUNNER_SHARED_TOKEN: ${RUNNER_SHARED_TOKEN}
-      PORT_RANGE_START: ${PORT_RANGE_START}
-      PORT_RANGE_END: ${PORT_RANGE_END}
-    depends_on:
-      db:
-        condition: service_healthy
-    networks: [platform]
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent storage for cloned repos and logs
       - ./runtime/repos:/runtime/repos
       - ./runtime/logs:/runtime/logs
-      - ./.cursor:/app/.cursor
+    networks:
+      - keystone_web
+      - keystone_internal
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keystone-api.rule=PathPrefix(`/api`)"
+      - "traefik.http.routers.keystone-api.entrypoints=web"
+      - "traefik.http.routers.keystone-api.priority=100"
+      - "traefik.http.services.keystone-api.loadbalancer.server.port=8000"
 
+  # ==========================================================================
+  # Keystone Frontend - React UI
+  # ==========================================================================
   frontend:
     build:
       context: ./platform/frontend
       args:
-        VITE_API_BASE: ${VITE_API_BASE:-}
-        VITE_BASE: ${VITE_BASE:-/}
+        VITE_API_BASE: ""  # API is on same origin via Traefik
+    container_name: keystone-frontend
+    restart: unless-stopped
+    networks:
+      - keystone_web
     depends_on:
       - backend
-    networks: [platform]
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
-      - "traefik.http.routers.frontend.entrypoints=web"
-      - "traefik.http.routers.frontend.priority=1"
-      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+      - "traefik.http.routers.keystone-ui.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.keystone-ui.entrypoints=web"
+      - "traefik.http.routers.keystone-ui.priority=1"
+      - "traefik.http.services.keystone-ui.loadbalancer.server.port=80"
 
+# ==========================================================================
+# Networks
+# ==========================================================================
 networks:
-  platform:
+  keystone_web:
+    name: keystone_web
+    driver: bridge
+  keystone_internal:
+    name: keystone_internal
+    driver: bridge
 
+# ==========================================================================
+# Volumes
+# ==========================================================================
 volumes:
   pgdata:
+    name: keystone_pgdata

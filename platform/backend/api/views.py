@@ -1,10 +1,17 @@
-import subprocess
-import yaml
+"""
+Keystone API Views
+
+Simple 3-step workflow:
+1. Import Repo - POST /api/apps/ with {name, git_url, branch}
+2. Prepare - POST /api/apps/{id}/prepare/ - Configure for Traefik
+3. Deploy - POST /api/apps/{id}/deploy/ - Build and run container
+"""
 import os
 import shutil
+import subprocess
 from pathlib import Path
-from urllib.parse import quote
 
+import yaml
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.authtoken.models import Token
@@ -12,602 +19,333 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AuditLog, Deployment, Repository, App
-from .serializers import (
-  AppSerializer,
-  AuditLogSerializer,
-  DeploymentSerializer,
-  RepositorySerializer,
-)
+from .models import App, Deployment
+from .serializers import AppSerializer, DeploymentSerializer
 
+# Directories for repos and logs
 REPOS_DIR = Path("/runtime/repos")
+LOGS_DIR = Path("/runtime/logs")
 REPOS_DIR.mkdir(parents=True, exist_ok=True)
-DEBUG_LOG_PATH = Path("/app/.cursor/debug.log")
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Debug logging configuration - disable by default to avoid any potential issues
-# Set ENABLE_DEBUG_LOGGING=true to enable file-based debug logging
-ENABLE_DEBUG_LOGGING = os.getenv("ENABLE_DEBUG_LOGGING", "false").lower() in ("true", "1", "yes")
+# Traefik network name
+TRAEFIK_NETWORK = "keystone_web"
 
-def _write_debug_log(session_id, run_id, hypothesis_id, location, message, data):
-    """Write debug log entry directly to file. Disabled by default via ENABLE_DEBUG_LOGGING env var."""
-    if not ENABLE_DEBUG_LOGGING:
-        return
+
+def run_cmd(cmd, cwd=None, timeout=300):
+    """Run a shell command and return result."""
     try:
-        DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        import json
-        log_data = {
-            "sessionId": session_id,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(timezone.now().timestamp() * 1000)
-        }
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_data) + "\n")
-    except: pass
-
-def _audit(user, action, resource_type, resource_id, details=None):
-  AuditLog.objects.create(
-    user=user if user and user.is_authenticated else None,
-    action=action,
-    resource_type=resource_type,
-    resource_id=resource_id,
-    details=details or {},
-  )
-
-def _git_url(repo):
-  url = repo.git_url
-  token = (getattr(repo, "github_token", "") or "").strip()
-  if token and url.startswith("https://") and "github.com" in url:
-    return url.replace("https://", f"https://x-access-token:{quote(token, safe='')}@")
-  return url
-
-def _run(cmd, cwd=None):
-  try:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
-  except FileNotFoundError as e:
-    result = subprocess.CompletedProcess(cmd, 1, "", f"Command not found: {cmd[0] if cmd else 'unknown'}. Error: {str(e)}")
-    return result
-
-class RepositoryViewSet(viewsets.ModelViewSet):
-  queryset = Repository.objects.all().order_by("-id")
-  serializer_class = RepositorySerializer
-
-  def list(self, request, *args, **kwargs):
-    # #region agent log
-    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
-    _write_debug_log(
-      "debug-session",
-      "api-request",
-      "F",
-      "views.py:RepositoryViewSet.list",
-      "Repository list request",
-      {
-        "user_authenticated": request.user.is_authenticated,
-        "user": str(request.user) if request.user.is_authenticated else "anonymous",
-        "has_auth_header": bool(auth_header),
-        "auth_header_prefix": auth_header[:20] if auth_header else "",
-        "origin": request.META.get("HTTP_ORIGIN", ""),
-      }
-    )
-    # #endregion
-    return super().list(request, *args, **kwargs)
-
-  def perform_create(self, serializer):
-    obj = serializer.save()
-    _audit(self.request.user, "create", "repository", obj.id, {"name": obj.name})
-
-  def perform_update(self, serializer):
-    obj = serializer.save()
-    _audit(self.request.user, "update", "repository", obj.id, {"name": obj.name})
-
-  def perform_destroy(self, instance):
-    _audit(self.request.user, "delete", "repository", instance.id, {"name": instance.name})
-    instance.delete()
-
-  @action(detail=True, methods=["post"])
-  def inspect(self, request, pk=None):
-    """Inspect repository: clone it and analyze docker-compose.yml"""
-    repo = self.get_object()
-    repo.inspection_status = "inspecting"
-    repo.save(update_fields=["inspection_status"])
-    
-    safe_name = repo.name.replace(" ", "_").lower()
-    workdir = REPOS_DIR / f"inspect_{safe_name}"
-    
-    try:
-      # Clean up any existing inspection directory
-      if workdir.exists():
-        shutil.rmtree(workdir)
-      
-      # Clone repository
-      git_url = _git_url(repo)
-      clone_result = _run(["git", "clone", "--depth", "1", "-b", repo.default_branch, git_url, str(workdir)])
-      
-      if clone_result.returncode != 0:
-        error_msg = clone_result.stderr.strip() or clone_result.stdout.strip() or "Unknown git error"
-        repo.inspection_status = "failed"
-        repo.inspection_details = {
-          "error": f"Git clone failed: {error_msg}",
-          "git_stdout": clone_result.stdout,
-          "git_stderr": clone_result.stderr,
-        }
-        repo.save(update_fields=["inspection_status", "inspection_details"])
-        return Response({"error": f"Failed to clone repository: {error_msg}"}, status=status.HTTP_400_BAD_REQUEST)
-      
-      # Look for docker-compose.yml or docker-compose.yaml
-      compose_files = []
-      for filename in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]:
-        compose_path = workdir / filename
-        if compose_path.exists():
-          compose_files.append(filename)
-      
-      inspection_details = {
-        "compose_files_found": compose_files,
-        "services": {},
-        "issues": [],
-        "recommendations": [],
-      }
-      
-      if not compose_files:
-        inspection_details["issues"].append("No docker-compose.yml file found. Keystone will use Dockerfile for deployment.")
-        repo.inspection_status = "ready"
-        repo.inspection_details = inspection_details
-        repo.last_inspected_at = timezone.now()
-        repo.save(update_fields=["inspection_status", "inspection_details", "last_inspected_at"])
-        _audit(request.user, "inspect", "repository", repo.id, {"status": "ready", "compose_files": []})
-        return Response({
-          "status": "ready",
-          "details": inspection_details,
-          "message": "Repository inspected. No docker-compose.yml found - will use Dockerfile."
-        })
-      
-      # Parse docker-compose.yml
-      compose_path = workdir / compose_files[0]
-      try:
-        with open(compose_path, "r", encoding="utf-8") as f:
-          compose_content = yaml.safe_load(f) or {}
-      except Exception as e:
-        inspection_details["issues"].append(f"Failed to parse docker-compose.yml: {str(e)}")
-        repo.inspection_status = "failed"
-        repo.inspection_details = inspection_details
-        repo.save(update_fields=["inspection_status", "inspection_details"])
-        return Response({"error": f"Failed to parse docker-compose.yml: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
-      
-      services = compose_content.get("services", {})
-      inspection_details["services"] = {name: {
-        "image": svc.get("image", ""),
-        "build": svc.get("build", {}),
-        "ports": svc.get("ports", []),
-        "environment": svc.get("environment", {}),
-        "labels": svc.get("labels", []),
-        "networks": svc.get("networks", []),
-      } for name, svc in services.items()}
-      
-      # Check for required Keystone deployment conditions
-      main_service = None
-      for name, svc in services.items():
-        # Find the main application service (not db, redis, etc.)
-        if not any(exclude in name.lower() for exclude in ["db", "database", "redis", "cache", "postgres", "mysql"]):
-          if svc.get("build") or svc.get("image"):
-            main_service = name
-            break
-      
-      if not main_service and services:
-        main_service = list(services.keys())[0]
-      
-      if main_service:
-        main_svc = services[main_service]
-        
-        # Check for Traefik labels
-        labels = main_svc.get("labels", [])
-        if isinstance(labels, list):
-          label_dict = {}
-          for label in labels:
-            if isinstance(label, str) and "=" in label:
-              k, v = label.split("=", 1)
-              label_dict[k] = v
-          labels = label_dict
-        elif isinstance(labels, dict):
-          label_dict = labels
-        else:
-          label_dict = {}
-        
-        has_traefik = any("traefik" in k.lower() for k in label_dict.keys())
-        
-        if not has_traefik:
-          inspection_details["recommendations"].append(
-            "Add Traefik labels for reverse proxy routing. Keystone will add these during preparation."
-          )
-        
-        # Check for network configuration
-        networks = main_svc.get("networks", [])
-        if not networks:
-          inspection_details["recommendations"].append(
-            "Add network configuration. Keystone will add 'platform' network during preparation."
-          )
-        
-        # Check for port configuration
-        ports = main_svc.get("ports", [])
-        if not ports:
-          inspection_details["recommendations"].append(
-            "Service should expose a port. Keystone will handle port mapping during deployment."
-          )
-        
-        inspection_details["main_service"] = main_service
-        inspection_details["has_traefik"] = has_traefik
-      
-      # Store original compose content for reference
-      inspection_details["original_compose"] = compose_content
-      
-      repo.inspection_status = "ready"
-      repo.inspection_details = inspection_details
-      repo.last_inspected_at = timezone.now()
-      repo.save(update_fields=["inspection_status", "inspection_details", "last_inspected_at"])
-      
-      _audit(request.user, "inspect", "repository", repo.id, {"status": "ready", "compose_files": compose_files})
-      
-      return Response({
-        "status": "ready",
-        "details": inspection_details,
-        "message": "Repository inspected successfully."
-      })
-      
+        result = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return 1, "", "Command timed out"
     except Exception as e:
-      import traceback
-      repo.inspection_status = "failed"
-      repo.inspection_details = {
-        "error": str(e),
-        "traceback": traceback.format_exc(),
-      }
-      repo.save(update_fields=["inspection_status", "inspection_details"])
-      return Response({"error": f"Inspection failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return 1, "", str(e)
 
-  @action(detail=True, methods=["post"])
-  def prepare(self, request, pk=None):
-    """Prepare repository: standardize docker-compose.yml and add Traefik configs"""
-    repo = self.get_object()
-    
-    if repo.inspection_status != "ready":
-      return Response(
-        {"error": "Repository must be inspected first. Run inspection before preparation."},
-        status=status.HTTP_400_BAD_REQUEST
-      )
-    
-    safe_name = repo.name.replace(" ", "_").lower()
-    workdir = REPOS_DIR / f"inspect_{safe_name}"
-    
-    if not workdir.exists():
-      return Response(
-        {"error": "Inspection directory not found. Please run inspection first."},
-        status=status.HTTP_400_BAD_REQUEST
-      )
-    
-    try:
-      # Find docker-compose file
-      compose_path = None
-      for filename in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]:
-        path = workdir / filename
-        if path.exists():
-          compose_path = path
-          break
-      
-      if not compose_path:
-        # No docker-compose.yml - create a minimal one for Keystone
-        compose_path = workdir / "docker-compose.yml"
-        compose_content = {
-          "version": "3.8",
-          "services": {
-            "app": {
-              "build": {"context": "."},
-              "networks": ["platform"],
-              "labels": [],
-            }
-          },
-          "networks": {
-            "platform": {"external": True}
-          }
-        }
-      else:
-        # Load existing compose file
-        with open(compose_path, "r", encoding="utf-8") as f:
-          compose_content = yaml.safe_load(f) or {}
-      
-      services = compose_content.get("services", {})
-      if not services:
-        return Response({"error": "No services found in docker-compose.yml"}, status=status.HTTP_400_BAD_REQUEST)
-      
-      # Find or create main service
-      main_service = None
-      for name, svc in services.items():
-        if not any(exclude in name.lower() for exclude in ["db", "database", "redis", "cache", "postgres", "mysql"]):
-          if svc.get("build") or svc.get("image"):
-            main_service = name
-            break
-      
-      if not main_service:
-        main_service = list(services.keys())[0]
-      
-      main_svc = services[main_service]
-      
-      # Ensure network configuration
-      if "networks" not in main_svc:
-        main_svc["networks"] = []
-      if "platform" not in main_svc["networks"]:
-        if isinstance(main_svc["networks"], list):
-          main_svc["networks"].append("platform")
-        else:
-          main_svc["networks"]["platform"] = {}
-      
-      # Ensure networks section exists
-      if "networks" not in compose_content:
-        compose_content["networks"] = {}
-      if "platform" not in compose_content["networks"]:
-        compose_content["networks"]["platform"] = {"external": True}
-      
-      # Add Traefik labels
-      if "labels" not in main_svc:
-        main_svc["labels"] = []
-      
-      # Convert labels to dict if needed
-      label_dict = {}
-      if isinstance(main_svc["labels"], list):
-        for label in main_svc["labels"]:
-          if isinstance(label, str) and "=" in label:
-            k, v = label.split("=", 1)
-            label_dict[k] = v
-          elif isinstance(label, dict):
-            label_dict.update(label)
-      elif isinstance(main_svc["labels"], dict):
-        label_dict = main_svc["labels"].copy()
-      
-      # Add standard Traefik labels
-      app_name_safe = repo.name.replace(" ", "-").lower()
-      label_dict["traefik.enable"] = "true"
-      label_dict[f"traefik.http.routers.{app_name_safe}.rule"] = f"Host(`{app_name_safe}.keystone.local`) || PathPrefix(`/{app_name_safe}`)"
-      label_dict[f"traefik.http.routers.{app_name_safe}.entrypoints"] = "web"
-      label_dict[f"traefik.http.services.{app_name_safe}.loadbalancer.server.port"] = "8000"
-      
-      # Convert back to list format (docker-compose prefers list)
-      main_svc["labels"] = [f"{k}={v}" for k, v in label_dict.items()]
-      
-      # Remove port mappings (Keystone handles port allocation)
-      if "ports" in main_svc:
-        # Keep internal port info but remove host mapping
-        ports = main_svc["ports"]
-        if isinstance(ports, list):
-          # Keep only internal ports for reference
-          main_svc["_original_ports"] = ports
-        main_svc.pop("ports", None)
-      
-      # Write updated compose file
-      with open(compose_path, "w", encoding="utf-8") as f:
-        yaml.dump(compose_content, f, default_flow_style=False, sort_keys=False)
-      
-      # Commit changes if git is configured
-      commit_result = _run(["git", "add", str(compose_path.relative_to(workdir))], cwd=str(workdir))
-      if commit_result.returncode == 0:
-        commit_result = _run(["git", "commit", "-m", "Keystone: Standardize deployment configuration"], cwd=str(workdir))
-        # Try to push if remote is configured (optional, may fail)
-        _run(["git", "push"], cwd=str(workdir))
-      
-      # Store deployment config
-      deployment_config = {
-        "compose_file": str(compose_path.relative_to(workdir)),
-        "main_service": main_service,
-        "traefik_labels": label_dict,
-        "networks": ["platform"],
-        "prepared_at": timezone.now().isoformat(),
-      }
-      
-      repo.deployment_config = deployment_config
-      repo.prepared_for_deployment = True
-      repo.save(update_fields=["deployment_config", "prepared_for_deployment"])
-      
-      _audit(request.user, "prepare", "repository", repo.id, {"config": deployment_config})
-      
-      return Response({
-        "status": "prepared",
-        "config": deployment_config,
-        "message": "Repository prepared for deployment. Configuration standardized and Traefik labels added."
-      })
-      
-    except Exception as e:
-      import traceback
-      return Response(
-        {"error": f"Preparation failed: {str(e)}", "traceback": traceback.format_exc()},
-        status=status.HTTP_500_INTERNAL_SERVER_ERROR
-      )
 
 class AppViewSet(viewsets.ModelViewSet):
-  queryset = App.objects.all().order_by("-id")
-  serializer_class = AppSerializer
-
-  def list(self, request, *args, **kwargs):
-    # #region agent log
-    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
-    _write_debug_log(
-      "debug-session",
-      "api-request",
-      "F",
-      "views.py:AppViewSet.list",
-      "App list request",
-      {
-        "user_authenticated": request.user.is_authenticated,
-        "user": str(request.user) if request.user.is_authenticated else "anonymous",
-        "has_auth_header": bool(auth_header),
-        "auth_header_prefix": auth_header[:20] if auth_header else "",
-        "origin": request.META.get("HTTP_ORIGIN", ""),
-      }
-    )
-    # #endregion
-    return super().list(request, *args, **kwargs)
-
-  def perform_create(self, serializer):
-    obj = serializer.save()
-    _audit(self.request.user, "create", "app", obj.id, {"name": obj.name, "repo_id": obj.repo_id})
-
-  def perform_update(self, serializer):
-    obj = serializer.save()
-    _audit(self.request.user, "update", "app", obj.id, {"name": obj.name, "repo_id": obj.repo_id})
-
-  def perform_destroy(self, instance):
-    _audit(self.request.user, "delete", "app", instance.id, {"name": instance.name, "repo_id": instance.repo_id})
-    instance.delete()
-
-  @action(detail=True, methods=["post"])
-  def deploy(self, request, pk=None):
-    app = self.get_object()
-    if not app.repo.prepared_for_deployment:
-      return Response(
-        {"error": "Repository must be inspected and prepared before deployment. Please run inspection and preparation first."},
-        status=status.HTTP_400_BAD_REQUEST
-      )
-    d = Deployment.objects.create(app=app, status="queued", deployment_type="initial")
-    app.status="deploying"
-    app.save(update_fields=["status"])
-    _audit(request.user, "deploy", "app", app.id, {"deployment_id": d.id, "type": "initial"})
-    return Response({"deployment_id": d.id, "status": d.status})
-
-  @action(detail=True, methods=["post"], url_path="update")
-  def update_deploy(self, request, pk=None):
-    app = self.get_object()
-    if not app.repo.prepared_for_deployment:
-      return Response(
-        {"error": "Repository must be inspected and prepared before deployment. Please run inspection and preparation first."},
-        status=status.HTTP_400_BAD_REQUEST
-      )
-    d = Deployment.objects.create(app=app, status="queued", deployment_type="update")
-    app.status="deploying"
-    app.save(update_fields=["status"])
-    _audit(request.user, "deploy", "app", app.id, {"deployment_id": d.id, "type": "update"})
-    return Response({"deployment_id": d.id, "status": d.status})
-
-  @action(detail=True, methods=["post"])
-  def rollback(self, request, pk=None):
-    app = self.get_object()
-    successes = list(app.deployments.filter(status="success").order_by("-ended_at").values_list("image_tag", flat=True))
-    if len(successes) < 2:
-      return Response({"error": "No previous successful deployment to roll back to."}, status=status.HTTP_400_BAD_REQUEST)
-
-    target_image = successes[1]
-    d = Deployment.objects.create(app=app, status="queued", deployment_type="rollback", image_tag=target_image)
-    app.status="deploying"
-    app.save(update_fields=["status"])
-    _audit(request.user, "rollback", "app", app.id, {"deployment_id": d.id, "image_tag": target_image})
-    return Response({"deployment_id": d.id, "status": d.status, "image_tag": target_image})
-
-  @action(detail=True, methods=["get"])
-  def container_status(self, request, pk=None):
-    import json
-    import urllib.request
-    import urllib.error
+    """
+    CRUD for Apps + prepare/deploy actions.
+    """
+    queryset = App.objects.all().order_by("-created_at")
+    serializer_class = AppSerializer
     
-    # #region agent log
-    _write_debug_log("debug-session", "container-status", "E", "views.py:container_status:439",
-                     "container_status called", {"app_id": pk, "user_authenticated": request.user.is_authenticated, "user": str(request.user) if request.user.is_authenticated else "anonymous"})
-    # #endregion
+    @action(detail=True, methods=["post"])
+    def prepare(self, request, pk=None):
+        """
+        Step 2: Prepare repo for Traefik deployment.
+        - Clone the repo
+        - Detect structure (Django backend, frontend, etc.)
+        - Generate Traefik labels
+        """
+        app = self.get_object()
+        
+        if app.status not in ["imported", "failed", "prepared"]:
+            return Response(
+                {"error": f"Cannot prepare app in status: {app.status}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        app.status = "preparing"
+        app.error_message = ""
+        app.save()
+        
+        try:
+            # Clone or update repo
+            repo_dir = REPOS_DIR / app.slug
+            
+            if repo_dir.exists():
+                shutil.rmtree(repo_dir)
+            
+            # Clone repo
+            code, out, err = run_cmd(
+                ["git", "clone", "--depth", "1", "-b", app.branch, app.git_url, str(repo_dir)]
+            )
+            
+            if code != 0:
+                raise Exception(f"Git clone failed: {err or out}")
+            
+            # Detect app structure
+            has_dockerfile = (repo_dir / "Dockerfile").exists()
+            has_compose = (repo_dir / "docker-compose.yml").exists() or (repo_dir / "compose.yml").exists()
+            has_requirements = (repo_dir / "requirements.txt").exists()
+            has_manage_py = (repo_dir / "manage.py").exists()
+            has_package_json = (repo_dir / "package.json").exists()
+            
+            structure = {
+                "dockerfile": has_dockerfile,
+                "docker_compose": has_compose,
+                "django": has_manage_py,
+                "python": has_requirements,
+                "node": has_package_json,
+            }
+            
+            # Generate Dockerfile if needed
+            if not has_dockerfile:
+                if has_manage_py:
+                    # Django app
+                    dockerfile_content = self._generate_django_dockerfile()
+                elif has_package_json:
+                    # Node app
+                    dockerfile_content = self._generate_node_dockerfile()
+                else:
+                    raise Exception("No Dockerfile found and couldn't detect app type")
+                
+                with open(repo_dir / "Dockerfile", "w") as f:
+                    f.write(dockerfile_content)
+            
+            # Set Traefik rule (path-based routing)
+            app.traefik_rule = f"PathPrefix(`/{app.slug}`)"
+            app.status = "prepared"
+            app.save()
+            
+            return Response({
+                "status": "prepared",
+                "structure": structure,
+                "traefik_rule": app.traefik_rule,
+                "message": f"App prepared. Will be accessible at /{app.slug}"
+            })
+            
+        except Exception as e:
+            app.status = "failed"
+            app.error_message = str(e)
+            app.save()
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
-    app = self.get_object()
-    safe = app.name.replace(" ","_").lower()
-    cname = f"app_{safe}"
+    @action(detail=True, methods=["post"])
+    def deploy(self, request, pk=None):
+        """
+        Step 3: Deploy the app.
+        - Build Docker image
+        - Run container with Traefik labels
+        """
+        app = self.get_object()
+        
+        if app.status not in ["prepared", "running", "stopped", "failed"]:
+            return Response(
+                {"error": f"App must be prepared first. Current status: {app.status}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create deployment record
+        deployment = Deployment.objects.create(app=app, status="running")
+        
+        app.status = "deploying"
+        app.error_message = ""
+        app.save()
+        
+        logs = []
+        
+        try:
+            repo_dir = REPOS_DIR / app.slug
+            
+            if not repo_dir.exists():
+                raise Exception("Repo not found. Please prepare first.")
+            
+            # Stop existing container if any
+            container_name = f"keystone-app-{app.slug}"
+            run_cmd(["docker", "stop", container_name])
+            run_cmd(["docker", "rm", container_name])
+            
+            # Build image
+            image_tag = f"keystone/{app.slug}:latest"
+            logs.append(f"Building image: {image_tag}")
+            
+            code, out, err = run_cmd(
+                ["docker", "build", "-t", image_tag, "."],
+                cwd=str(repo_dir),
+                timeout=600
+            )
+            logs.append(f"Build output:\n{out}\n{err}")
+            
+            if code != 0:
+                raise Exception(f"Docker build failed: {err or out}")
+            
+            # Prepare environment variables
+            env_args = []
+            for key, value in (app.env_vars or {}).items():
+                env_args.extend(["-e", f"{key}={value}"])
+            
+            # Run container with Traefik labels
+            docker_run_cmd = [
+                "docker", "run", "-d",
+                "--name", container_name,
+                "--network", TRAEFIK_NETWORK,
+                "--restart", "unless-stopped",
+                # Traefik labels
+                "-l", "traefik.enable=true",
+                "-l", f"traefik.http.routers.{app.slug}.rule={app.traefik_rule}",
+                "-l", f"traefik.http.routers.{app.slug}.entrypoints=web",
+                "-l", f"traefik.http.services.{app.slug}.loadbalancer.server.port={app.container_port}",
+                # Strip path prefix so app receives clean URLs
+                "-l", f"traefik.http.middlewares.{app.slug}-strip.stripprefix.prefixes=/{app.slug}",
+                "-l", f"traefik.http.routers.{app.slug}.middlewares={app.slug}-strip",
+            ] + env_args + [image_tag]
+            
+            logs.append(f"Running container: {container_name}")
+            code, out, err = run_cmd(docker_run_cmd)
+            logs.append(f"Run output:\n{out}\n{err}")
+            
+            if code != 0:
+                raise Exception(f"Docker run failed: {err or out}")
+            
+            # Get container ID
+            app.container_id = out.strip()[:12]
+            app.status = "running"
+            app.save()
+            
+            deployment.status = "success"
+            deployment.logs = "\n".join(logs)
+            deployment.finished_at = timezone.now()
+            deployment.save()
+            
+            return Response({
+                "status": "running",
+                "container_id": app.container_id,
+                "url": f"/{app.slug}",
+                "message": f"App deployed! Access at http://YOUR_VPS_IP/{app.slug}"
+            })
+            
+        except Exception as e:
+            app.status = "failed"
+            app.error_message = str(e)
+            app.save()
+            
+            deployment.status = "failed"
+            deployment.error = str(e)
+            deployment.logs = "\n".join(logs)
+            deployment.finished_at = timezone.now()
+            deployment.save()
+            
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
-    # Try to find docker command
-    docker_cmd = None
-    for cmd in ["docker", "docker.io"]:
-      result = subprocess.run(["which", cmd], capture_output=True, text=True)
-      if result.returncode == 0 and result.stdout.strip():
-        docker_cmd = result.stdout.strip()
-        break
+    @action(detail=True, methods=["post"])
+    def stop(self, request, pk=None):
+        """Stop a running app."""
+        app = self.get_object()
+        container_name = f"keystone-app-{app.slug}"
+        
+        run_cmd(["docker", "stop", container_name])
+        app.status = "stopped"
+        app.save()
+        
+        return Response({"status": "stopped"})
     
-    if not docker_cmd:
-      # Check common paths
-      for path in ["/usr/bin/docker", "/usr/bin/docker.io", "/usr/local/bin/docker"]:
-        if os.path.exists(path):
-          docker_cmd = path
-          break
+    @action(detail=True, methods=["get"])
+    def logs(self, request, pk=None):
+        """Get container logs."""
+        app = self.get_object()
+        container_name = f"keystone-app-{app.slug}"
+        
+        code, out, err = run_cmd(["docker", "logs", "--tail", "100", container_name])
+        
+        return Response({"logs": out or err})
     
-    if not docker_cmd:
-      # #region agent log
-      _write_debug_log("debug-session", "container-status", "E", "views.py:container_status:470",
-                       "Docker command not found in backend", {"app_id": pk, "cname": cname})
-      # #endregion
-      return Response({"status": "unknown", "details": "Docker command not available in backend container"})
+    def _generate_django_dockerfile(self):
+        """Generate Dockerfile for Django app."""
+        return '''FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt gunicorn
+
+# Copy app
+COPY . .
+
+# Collect static files
+RUN python manage.py collectstatic --noinput 2>/dev/null || true
+
+EXPOSE 8000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "config.wsgi:application"]
+'''
     
-    try:
-      result = subprocess.run(
-        [docker_cmd, "ps", "--filter", f"name={cname}", "--format", "{{.Status}}"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-      )
-      # #region agent log
-      _write_debug_log("debug-session", "container-status", "E", "views.py:container_status:490",
-                       "Docker ps result", {"returncode": result.returncode, "stdout": result.stdout[:100], "stderr": result.stderr[:100]})
-      # #endregion
-      if result.returncode == 0 and result.stdout.strip():
-        return Response({"status": "running", "details": result.stdout.strip()})
-      return Response({"status": "stopped"})
-    except Exception as e:
-      # #region agent log
-      _write_debug_log("debug-session", "container-status", "E", "views.py:container_status:505",
-                       "Exception in container_status", {"error": str(e)[:200]})
-      # #endregion
-      return Response({"status": "error", "details": str(e)[:200]}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    def _generate_node_dockerfile(self):
+        """Generate Dockerfile for Node app."""
+        return '''FROM node:20-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+RUN npm run build 2>/dev/null || true
+
+EXPOSE 3000
+
+CMD ["npm", "start"]
+'''
 
 
 class DeploymentViewSet(viewsets.ReadOnlyModelViewSet):
-  serializer_class = DeploymentSerializer
-  queryset = Deployment.objects.select_related("app", "app__repo").all().order_by("-created_at")
-
-  def get_queryset(self):
-    qs = super().get_queryset()
-    app_id = self.request.query_params.get("app")
-    if app_id:
-      qs = qs.filter(app_id=app_id)
-    return qs
-
-  @action(detail=True, methods=["get"])
-  def logs(self, request, pk=None):
-    dep = self.get_object()
-    if not dep.logs_path:
-      return Response({"error": "No logs available"}, status=status.HTTP_404_NOT_FOUND)
-    p = Path(dep.logs_path)
-    if not p.exists():
-      return Response({"error": "Log file not found"}, status=status.HTTP_404_NOT_FOUND)
-    try:
-      return Response({"deployment_id": dep.id, "logs": p.read_text(encoding="utf-8", errors="replace")})
-    except Exception as e:  # noqa: BLE001
-      return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    """View deployment history."""
+    queryset = Deployment.objects.all()
+    serializer_class = DeploymentSerializer
+    
+    def get_queryset(self):
+        qs = super().get_queryset()
+        app_id = self.request.query_params.get("app")
+        if app_id:
+            qs = qs.filter(app_id=app_id)
+        return qs
 
 
-class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
-  serializer_class = AuditLogSerializer
-  queryset = AuditLog.objects.select_related("user").all()
+# =============================================================================
+# Auth Views
+# =============================================================================
 
-
-class AuthTokenView(APIView):
-  permission_classes = [permissions.AllowAny]
-
-  def post(self, request):
-    username = request.data.get("username", "")
-    password = request.data.get("password", "")
-    from django.contrib.auth import authenticate  # local import
-    user = authenticate(request, username=username, password=password)
-    if not user:
-      return Response({"error": "Invalid credentials"}, status=status.HTTP_400_BAD_REQUEST)
-    token, _ = Token.objects.get_or_create(user=user)
-    return Response({"token": token.key, "username": user.username})
+class LoginView(APIView):
+    """Get auth token."""
+    permission_classes = [permissions.AllowAny]
+    
+    def post(self, request):
+        from django.contrib.auth import authenticate
+        
+        username = request.data.get("username", "")
+        password = request.data.get("password", "")
+        
+        user = authenticate(request, username=username, password=password)
+        if not user:
+            return Response({"error": "Invalid credentials"}, status=400)
+        
+        token, _ = Token.objects.get_or_create(user=user)
+        return Response({"token": token.key, "username": user.username})
 
 
 class LogoutView(APIView):
-  def post(self, request):
-    Token.objects.filter(user=request.user).delete()
-    return Response({"ok": True})
+    """Invalidate auth token."""
+    def post(self, request):
+        Token.objects.filter(user=request.user).delete()
+        return Response({"ok": True})
+
 
 @api_view(["GET"])
 @permission_classes([permissions.AllowAny])
 def health(request):
-  return Response({"ok": True, "ts": timezone.now().isoformat()})
+    """Health check endpoint."""
+    return Response({"status": "ok", "service": "keystone"})
