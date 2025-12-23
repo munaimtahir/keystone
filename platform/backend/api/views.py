@@ -9,8 +9,10 @@ Simple 3-step workflow:
 import os
 import shutil
 import subprocess
+import copy
 from pathlib import Path
 
+import yaml
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.authtoken.models import Token
@@ -29,6 +31,150 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Traefik network name
 TRAEFIK_NETWORK = "keystone_web"
+
+
+def inject_traefik_config(compose_path, app_slug, app_traefik_rule):
+    """
+    Modify a docker-compose.yml to add Traefik routing configuration.
+    - Adds Traefik labels to web-facing services
+    - Connects services to keystone_web network
+    - Removes conflicting port mappings (80, 443)
+    - Backs up original file
+    """
+    # Read original compose file
+    with open(compose_path, 'r') as f:
+        compose_data = yaml.safe_load(f)
+    
+    if not compose_data or 'services' not in compose_data:
+        raise Exception("Invalid docker-compose.yml: no services found")
+    
+    # Backup original
+    backup_path = compose_path.parent / f"{compose_path.name}.original"
+    shutil.copy(compose_path, backup_path)
+    
+    modified_services = []
+    
+    # Common web service names to look for
+    web_service_names = ['nginx', 'frontend', 'web', 'proxy', 'gateway', 'app']
+    backend_service_names = ['backend', 'api', 'server', 'django', 'flask', 'fastapi']
+    
+    # Find services that expose web ports or match web service names
+    for service_name, service_config in compose_data['services'].items():
+        if service_config is None:
+            service_config = {}
+            compose_data['services'][service_name] = service_config
+        
+        is_web_service = False
+        service_port = None
+        
+        # Check if service has ports that look like web ports
+        ports = service_config.get('ports', [])
+        for port in ports:
+            port_str = str(port)
+            # Look for common web ports (80, 443, 3000, 8000, 8080, 5000)
+            if any(p in port_str for p in ['80:', '443:', '3000:', '8000:', '8080:', '5000:', ':80', ':443']):
+                is_web_service = True
+                # Extract the container port
+                if ':' in port_str:
+                    parts = port_str.split(':')
+                    service_port = parts[-1].split('/')[0]  # Handle "8000:8000/tcp"
+                break
+        
+        # Check if service name suggests it's a web service
+        service_name_lower = service_name.lower()
+        if any(name in service_name_lower for name in web_service_names):
+            is_web_service = True
+            if not service_port:
+                service_port = "80"
+        elif any(name in service_name_lower for name in backend_service_names):
+            is_web_service = True
+            if not service_port:
+                service_port = "8000"
+        
+        if is_web_service:
+            # Add Traefik labels
+            labels = service_config.get('labels', [])
+            if isinstance(labels, dict):
+                labels = [f"{k}={v}" for k, v in labels.items()]
+            
+            # Create unique router name for this service
+            router_name = f"{app_slug}-{service_name}"
+            
+            # Determine the path prefix for this service
+            if service_name_lower in ['nginx', 'frontend', 'web', 'proxy', 'gateway']:
+                # Frontend/proxy gets the main path
+                path_prefix = f"/{app_slug}"
+            else:
+                # Backend services get a subpath
+                path_prefix = f"/{app_slug}/api" if 'backend' in service_name_lower or 'api' in service_name_lower else f"/{app_slug}/{service_name}"
+            
+            traefik_labels = [
+                "traefik.enable=true",
+                f"traefik.http.routers.{router_name}.rule=PathPrefix(`{path_prefix}`)",
+                f"traefik.http.routers.{router_name}.entrypoints=web",
+                f"traefik.http.services.{router_name}.loadbalancer.server.port={service_port}",
+                f"traefik.http.middlewares.{router_name}-strip.stripprefix.prefixes={path_prefix}",
+                f"traefik.http.routers.{router_name}.middlewares={router_name}-strip",
+            ]
+            
+            # Add labels
+            for label in traefik_labels:
+                if label not in labels:
+                    labels.append(label)
+            
+            service_config['labels'] = labels
+            
+            # Remove conflicting port mappings (ports that would conflict on host)
+            if 'ports' in service_config:
+                new_ports = []
+                for port in service_config['ports']:
+                    port_str = str(port)
+                    # Keep internal-only ports, remove host-mapped ones
+                    if ':' not in port_str:
+                        new_ports.append(port)
+                    else:
+                        # Check if it's mapping to host ports 80 or 443 (which Traefik uses)
+                        host_port = port_str.split(':')[0]
+                        if host_port not in ['80', '443']:
+                            # Keep non-conflicting ports but comment them out by not adding
+                            pass
+                # Remove ports section if empty, Traefik handles routing
+                if new_ports:
+                    service_config['ports'] = new_ports
+                else:
+                    service_config.pop('ports', None)
+            
+            # Ensure service is on keystone_web network
+            networks = service_config.get('networks', [])
+            if isinstance(networks, list):
+                if TRAEFIK_NETWORK not in networks:
+                    networks.append(TRAEFIK_NETWORK)
+            elif isinstance(networks, dict):
+                if TRAEFIK_NETWORK not in networks:
+                    networks[TRAEFIK_NETWORK] = {}
+            else:
+                networks = [TRAEFIK_NETWORK]
+            service_config['networks'] = networks
+            
+            modified_services.append({
+                "name": service_name,
+                "port": service_port,
+                "path": path_prefix
+            })
+    
+    # Add keystone_web to top-level networks as external
+    if 'networks' not in compose_data:
+        compose_data['networks'] = {}
+    
+    compose_data['networks'][TRAEFIK_NETWORK] = {
+        'external': True
+    }
+    
+    # Write modified compose file
+    with open(compose_path, 'w') as f:
+        yaml.dump(compose_data, f, default_flow_style=False, sort_keys=False)
+    
+    return modified_services
 
 
 def run_cmd(cmd, cwd=None, timeout=300):
@@ -143,11 +289,22 @@ class AppViewSet(viewsets.ModelViewSet):
             # Determine deployment strategy
             if has_compose:
                 # Multi-service app with docker-compose.yml
+                # INJECT TRAEFIK CONFIGURATION into the compose file
+                compose_path = repo_dir / compose_file
+                modified_services = inject_traefik_config(
+                    compose_path, 
+                    app.slug, 
+                    f"PathPrefix(`/{app.slug}`)"
+                )
+                
                 # Store the compose file path for deploy step
                 app.env_vars = app.env_vars or {}
                 app.env_vars["_keystone_deploy_mode"] = "compose"
                 app.env_vars["_keystone_compose_file"] = compose_file
-                structure["message"] = "Using docker-compose.yml for deployment"
+                
+                structure["message"] = "Modified docker-compose.yml with Traefik routing"
+                structure["modified_services"] = modified_services
+                structure["traefik_injected"] = True
                 
             elif dockerfile_path:
                 # Found Dockerfile (possibly in subdirectory)
@@ -261,11 +418,12 @@ class AppViewSet(viewsets.ModelViewSet):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def _deploy_compose(self, app, deployment, repo_dir, logs):
-        """Deploy app using docker-compose."""
+        """Deploy app using docker-compose with Traefik routing."""
         env_vars = app.env_vars or {}
         compose_file = env_vars.get("_keystone_compose_file", "docker-compose.yml")
         
         logs.append(f"Deploying with docker-compose: {compose_file}")
+        logs.append(f"Traefik routing: {app.traefik_rule}")
         
         # Create a project name based on app slug
         project_name = f"keystone-{app.slug}"
@@ -273,31 +431,36 @@ class AppViewSet(viewsets.ModelViewSet):
         # Stop existing compose stack if any
         logs.append("Stopping existing containers...")
         run_cmd(
-            ["docker", "compose", "-p", project_name, "-f", compose_file, "down"],
+            ["docker", "compose", "-p", project_name, "-f", compose_file, "down", "--remove-orphans"],
             cwd=str(repo_dir),
             timeout=120
         )
         
-        # Prepare environment variables file
+        # Handle .env file - copy from .env.example if exists and .env doesn't
+        env_example = repo_dir / ".env.example"
+        env_file = repo_dir / ".env"
+        if env_example.exists() and not env_file.exists():
+            shutil.copy(env_example, env_file)
+            logs.append("Created .env from .env.example")
+        
+        # Prepare environment variables to inject
         env_file_content = []
         for key, value in env_vars.items():
             if not key.startswith("_keystone_"):  # Skip internal keys
                 env_file_content.append(f"{key}={value}")
         
-        # Write .env file if we have env vars
+        # Append Keystone env vars to .env file
         if env_file_content:
-            env_file_path = repo_dir / ".env"
-            # Append to existing .env or create new
-            mode = "a" if env_file_path.exists() else "w"
-            with open(env_file_path, mode) as f:
+            mode = "a" if env_file.exists() else "w"
+            with open(env_file, mode) as f:
                 f.write("\n# Keystone injected vars\n")
                 f.write("\n".join(env_file_content) + "\n")
-            logs.append(f"Wrote {len(env_file_content)} env vars to .env")
+            logs.append(f"Added {len(env_file_content)} env vars to .env")
         
-        # Build and start
+        # Build images
         logs.append("Building images...")
         code, out, err = run_cmd(
-            ["docker", "compose", "-p", project_name, "-f", compose_file, "build"],
+            ["docker", "compose", "-p", project_name, "-f", compose_file, "build", "--no-cache"],
             cwd=str(repo_dir),
             timeout=900
         )
@@ -306,7 +469,8 @@ class AppViewSet(viewsets.ModelViewSet):
         if code != 0:
             raise Exception(f"Docker compose build failed: {err or out}")
         
-        logs.append("Starting services...")
+        # Start services
+        logs.append("Starting services with Traefik routing...")
         code, out, err = run_cmd(
             ["docker", "compose", "-p", project_name, "-f", compose_file, "up", "-d"],
             cwd=str(repo_dir),
@@ -317,11 +481,12 @@ class AppViewSet(viewsets.ModelViewSet):
         if code != 0:
             raise Exception(f"Docker compose up failed: {err or out}")
         
-        # Get container info
+        # Get running containers
         code, out, err = run_cmd(
-            ["docker", "compose", "-p", project_name, "-f", compose_file, "ps", "--format", "json"],
+            ["docker", "compose", "-p", project_name, "-f", compose_file, "ps", "--format", "table"],
             cwd=str(repo_dir)
         )
+        logs.append(f"Running containers:\n{out}")
         
         app.container_id = project_name  # Store project name for compose apps
         app.status = "running"
@@ -336,7 +501,8 @@ class AppViewSet(viewsets.ModelViewSet):
             "status": "running",
             "container_id": project_name,
             "deploy_mode": "compose",
-            "message": f"App deployed with docker-compose! Check your compose file for service URLs."
+            "url": f"/{app.slug}",
+            "message": f"App deployed! Access at http://YOUR_VPS_IP/{app.slug}"
         })
 
     def _deploy_dockerfile(self, app, deployment, repo_dir, logs):
