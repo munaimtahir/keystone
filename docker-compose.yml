@@ -17,7 +17,7 @@ services:
   # Routes traffic to Keystone and deployed apps
   # ==========================================================================
   traefik:
-    image: traefik:v3.2
+    image: traefik:v3.6
     container_name: keystone-traefik
     restart: unless-stopped
     command:
@@ -34,7 +34,7 @@ services:
       - --log.level=INFO
     ports:
       - "80:80"
-      - "8080:8080"  # Traefik dashboard
+      - "127.0.0.1:8080:8080"  # Traefik dashboard (localhost only for security)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
