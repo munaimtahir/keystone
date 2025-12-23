@@ -51,12 +51,43 @@ class AppViewSet(viewsets.ModelViewSet):
     queryset = App.objects.all().order_by("-created_at")
     serializer_class = AppSerializer
     
+    def _find_dockerfile_or_app(self, repo_dir):
+        """
+        Find Dockerfile or app files in repo, checking root and common subdirectories.
+        Returns: (dockerfile_path, app_type, build_context)
+        """
+        # Common subdirectory names to check
+        subdirs_to_check = ["", "backend", "app", "src", "api", "server"]
+        
+        for subdir in subdirs_to_check:
+            check_dir = repo_dir / subdir if subdir else repo_dir
+            if not check_dir.exists():
+                continue
+                
+            # Check for Dockerfile
+            if (check_dir / "Dockerfile").exists():
+                return (check_dir / "Dockerfile", "dockerfile", check_dir)
+            
+            # Check for Django app
+            if (check_dir / "manage.py").exists():
+                return (None, "django", check_dir)
+            
+            # Check for Node app
+            if (check_dir / "package.json").exists():
+                return (None, "node", check_dir)
+            
+            # Check for Python app with requirements.txt
+            if (check_dir / "requirements.txt").exists():
+                return (None, "python", check_dir)
+        
+        return (None, None, None)
+
     @action(detail=True, methods=["post"])
     def prepare(self, request, pk=None):
         """
         Step 2: Prepare repo for Traefik deployment.
         - Clone the repo
-        - Detect structure (Django backend, frontend, etc.)
+        - Detect structure (Django backend, frontend, docker-compose, etc.)
         - Generate Traefik labels
         """
         app = self.get_object()
@@ -86,34 +117,76 @@ class AppViewSet(viewsets.ModelViewSet):
             if code != 0:
                 raise Exception(f"Git clone failed: {err or out}")
             
-            # Detect app structure
-            has_dockerfile = (repo_dir / "Dockerfile").exists()
+            # Check for docker-compose.yml first (multi-service apps)
             has_compose = (repo_dir / "docker-compose.yml").exists() or (repo_dir / "compose.yml").exists()
+            compose_file = "docker-compose.yml" if (repo_dir / "docker-compose.yml").exists() else "compose.yml" if (repo_dir / "compose.yml").exists() else None
+            
+            # Detect app structure at root level
+            has_dockerfile = (repo_dir / "Dockerfile").exists()
             has_requirements = (repo_dir / "requirements.txt").exists()
             has_manage_py = (repo_dir / "manage.py").exists()
             has_package_json = (repo_dir / "package.json").exists()
             
+            # Find Dockerfile or app in subdirectories
+            dockerfile_path, app_type, build_context = self._find_dockerfile_or_app(repo_dir)
+            
             structure = {
-                "dockerfile": has_dockerfile,
+                "dockerfile": has_dockerfile or (dockerfile_path is not None),
                 "docker_compose": has_compose,
-                "django": has_manage_py,
-                "python": has_requirements,
-                "node": has_package_json,
+                "django": has_manage_py or app_type == "django",
+                "python": has_requirements or app_type == "python",
+                "node": has_package_json or app_type == "node",
+                "build_context": str(build_context.relative_to(repo_dir)) if build_context and build_context != repo_dir else ".",
+                "deploy_mode": "compose" if has_compose else "dockerfile",
             }
             
-            # Generate Dockerfile if needed
-            if not has_dockerfile:
-                if has_manage_py:
-                    # Django app
-                    dockerfile_content = self._generate_django_dockerfile()
-                elif has_package_json:
-                    # Node app
-                    dockerfile_content = self._generate_node_dockerfile()
-                else:
-                    raise Exception("No Dockerfile found and couldn't detect app type")
+            # Determine deployment strategy
+            if has_compose:
+                # Multi-service app with docker-compose.yml
+                # Store the compose file path for deploy step
+                app.env_vars = app.env_vars or {}
+                app.env_vars["_keystone_deploy_mode"] = "compose"
+                app.env_vars["_keystone_compose_file"] = compose_file
+                structure["message"] = "Using docker-compose.yml for deployment"
                 
-                with open(repo_dir / "Dockerfile", "w") as f:
+            elif dockerfile_path:
+                # Found Dockerfile (possibly in subdirectory)
+                app.env_vars = app.env_vars or {}
+                app.env_vars["_keystone_deploy_mode"] = "dockerfile"
+                app.env_vars["_keystone_build_context"] = str(build_context.relative_to(repo_dir)) if build_context != repo_dir else "."
+                
+            elif has_dockerfile:
+                # Dockerfile at root
+                app.env_vars = app.env_vars or {}
+                app.env_vars["_keystone_deploy_mode"] = "dockerfile"
+                app.env_vars["_keystone_build_context"] = "."
+                
+            elif app_type == "django":
+                # Generate Django Dockerfile
+                dockerfile_content = self._generate_django_dockerfile()
+                with open(build_context / "Dockerfile", "w") as f:
                     f.write(dockerfile_content)
+                app.env_vars = app.env_vars or {}
+                app.env_vars["_keystone_deploy_mode"] = "dockerfile"
+                app.env_vars["_keystone_build_context"] = str(build_context.relative_to(repo_dir)) if build_context != repo_dir else "."
+                structure["generated_dockerfile"] = True
+                
+            elif app_type == "node":
+                # Generate Node Dockerfile
+                dockerfile_content = self._generate_node_dockerfile()
+                with open(build_context / "Dockerfile", "w") as f:
+                    f.write(dockerfile_content)
+                app.env_vars = app.env_vars or {}
+                app.env_vars["_keystone_deploy_mode"] = "dockerfile"
+                app.env_vars["_keystone_build_context"] = str(build_context.relative_to(repo_dir)) if build_context != repo_dir else "."
+                structure["generated_dockerfile"] = True
+                
+            else:
+                raise Exception(
+                    "No Dockerfile or docker-compose.yml found, and couldn't detect app type. "
+                    "Checked: root, backend/, app/, src/, api/, server/ directories. "
+                    "Please add a Dockerfile or docker-compose.yml to your repository."
+                )
             
             # Set Traefik rule (path-based routing)
             app.traefik_rule = f"PathPrefix(`/{app.slug}`)"
@@ -137,8 +210,8 @@ class AppViewSet(viewsets.ModelViewSet):
     def deploy(self, request, pk=None):
         """
         Step 3: Deploy the app.
-        - Build Docker image
-        - Run container with Traefik labels
+        - For docker-compose apps: use docker compose up
+        - For single Dockerfile apps: build and run with Traefik labels
         """
         app = self.get_object()
         
@@ -163,69 +236,16 @@ class AppViewSet(viewsets.ModelViewSet):
             if not repo_dir.exists():
                 raise Exception("Repo not found. Please prepare first.")
             
-            # Stop existing container if any
-            container_name = f"keystone-app-{app.slug}"
-            run_cmd(["docker", "stop", container_name])
-            run_cmd(["docker", "rm", container_name])
+            # Get deployment mode from env_vars (set during prepare)
+            env_vars = app.env_vars or {}
+            deploy_mode = env_vars.get("_keystone_deploy_mode", "dockerfile")
             
-            # Build image
-            image_tag = f"keystone/{app.slug}:latest"
-            logs.append(f"Building image: {image_tag}")
-            
-            code, out, err = run_cmd(
-                ["docker", "build", "-t", image_tag, "."],
-                cwd=str(repo_dir),
-                timeout=600
-            )
-            logs.append(f"Build output:\n{out}\n{err}")
-            
-            if code != 0:
-                raise Exception(f"Docker build failed: {err or out}")
-            
-            # Prepare environment variables
-            env_args = []
-            for key, value in (app.env_vars or {}).items():
-                env_args.extend(["-e", f"{key}={value}"])
-            
-            # Run container with Traefik labels
-            docker_run_cmd = [
-                "docker", "run", "-d",
-                "--name", container_name,
-                "--network", TRAEFIK_NETWORK,
-                "--restart", "unless-stopped",
-                # Traefik labels
-                "-l", "traefik.enable=true",
-                "-l", f"traefik.http.routers.{app.slug}.rule={app.traefik_rule}",
-                "-l", f"traefik.http.routers.{app.slug}.entrypoints=web",
-                "-l", f"traefik.http.services.{app.slug}.loadbalancer.server.port={app.container_port}",
-                # Strip path prefix so app receives clean URLs
-                "-l", f"traefik.http.middlewares.{app.slug}-strip.stripprefix.prefixes=/{app.slug}",
-                "-l", f"traefik.http.routers.{app.slug}.middlewares={app.slug}-strip",
-            ] + env_args + [image_tag]
-            
-            logs.append(f"Running container: {container_name}")
-            code, out, err = run_cmd(docker_run_cmd)
-            logs.append(f"Run output:\n{out}\n{err}")
-            
-            if code != 0:
-                raise Exception(f"Docker run failed: {err or out}")
-            
-            # Get container ID
-            app.container_id = out.strip()[:12]
-            app.status = "running"
-            app.save()
-            
-            deployment.status = "success"
-            deployment.logs = "\n".join(logs)
-            deployment.finished_at = timezone.now()
-            deployment.save()
-            
-            return Response({
-                "status": "running",
-                "container_id": app.container_id,
-                "url": f"/{app.slug}",
-                "message": f"App deployed! Access at http://YOUR_VPS_IP/{app.slug}"
-            })
+            if deploy_mode == "compose":
+                # Deploy using docker-compose
+                return self._deploy_compose(app, deployment, repo_dir, logs)
+            else:
+                # Deploy using single Dockerfile
+                return self._deploy_dockerfile(app, deployment, repo_dir, logs)
             
         except Exception as e:
             app.status = "failed"
@@ -239,14 +259,179 @@ class AppViewSet(viewsets.ModelViewSet):
             deployment.save()
             
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def _deploy_compose(self, app, deployment, repo_dir, logs):
+        """Deploy app using docker-compose."""
+        env_vars = app.env_vars or {}
+        compose_file = env_vars.get("_keystone_compose_file", "docker-compose.yml")
+        
+        logs.append(f"Deploying with docker-compose: {compose_file}")
+        
+        # Create a project name based on app slug
+        project_name = f"keystone-{app.slug}"
+        
+        # Stop existing compose stack if any
+        logs.append("Stopping existing containers...")
+        run_cmd(
+            ["docker", "compose", "-p", project_name, "-f", compose_file, "down"],
+            cwd=str(repo_dir),
+            timeout=120
+        )
+        
+        # Prepare environment variables file
+        env_file_content = []
+        for key, value in env_vars.items():
+            if not key.startswith("_keystone_"):  # Skip internal keys
+                env_file_content.append(f"{key}={value}")
+        
+        # Write .env file if we have env vars
+        if env_file_content:
+            env_file_path = repo_dir / ".env"
+            # Append to existing .env or create new
+            mode = "a" if env_file_path.exists() else "w"
+            with open(env_file_path, mode) as f:
+                f.write("\n# Keystone injected vars\n")
+                f.write("\n".join(env_file_content) + "\n")
+            logs.append(f"Wrote {len(env_file_content)} env vars to .env")
+        
+        # Build and start
+        logs.append("Building images...")
+        code, out, err = run_cmd(
+            ["docker", "compose", "-p", project_name, "-f", compose_file, "build"],
+            cwd=str(repo_dir),
+            timeout=900
+        )
+        logs.append(f"Build output:\n{out}\n{err}")
+        
+        if code != 0:
+            raise Exception(f"Docker compose build failed: {err or out}")
+        
+        logs.append("Starting services...")
+        code, out, err = run_cmd(
+            ["docker", "compose", "-p", project_name, "-f", compose_file, "up", "-d"],
+            cwd=str(repo_dir),
+            timeout=300
+        )
+        logs.append(f"Up output:\n{out}\n{err}")
+        
+        if code != 0:
+            raise Exception(f"Docker compose up failed: {err or out}")
+        
+        # Get container info
+        code, out, err = run_cmd(
+            ["docker", "compose", "-p", project_name, "-f", compose_file, "ps", "--format", "json"],
+            cwd=str(repo_dir)
+        )
+        
+        app.container_id = project_name  # Store project name for compose apps
+        app.status = "running"
+        app.save()
+        
+        deployment.status = "success"
+        deployment.logs = "\n".join(logs)
+        deployment.finished_at = timezone.now()
+        deployment.save()
+        
+        return Response({
+            "status": "running",
+            "container_id": project_name,
+            "deploy_mode": "compose",
+            "message": f"App deployed with docker-compose! Check your compose file for service URLs."
+        })
+
+    def _deploy_dockerfile(self, app, deployment, repo_dir, logs):
+        """Deploy app using single Dockerfile."""
+        env_vars = app.env_vars or {}
+        build_context = env_vars.get("_keystone_build_context", ".")
+        build_dir = repo_dir / build_context if build_context != "." else repo_dir
+        
+        # Stop existing container if any
+        container_name = f"keystone-app-{app.slug}"
+        run_cmd(["docker", "stop", container_name])
+        run_cmd(["docker", "rm", container_name])
+        
+        # Build image
+        image_tag = f"keystone/{app.slug}:latest"
+        logs.append(f"Building image: {image_tag} (context: {build_context})")
+        
+        code, out, err = run_cmd(
+            ["docker", "build", "-t", image_tag, "."],
+            cwd=str(build_dir),
+            timeout=600
+        )
+        logs.append(f"Build output:\n{out}\n{err}")
+        
+        if code != 0:
+            raise Exception(f"Docker build failed: {err or out}")
+        
+        # Prepare environment variables (skip internal keys)
+        env_args = []
+        for key, value in env_vars.items():
+            if not key.startswith("_keystone_"):
+                env_args.extend(["-e", f"{key}={value}"])
+        
+        # Run container with Traefik labels
+        docker_run_cmd = [
+            "docker", "run", "-d",
+            "--name", container_name,
+            "--network", TRAEFIK_NETWORK,
+            "--restart", "unless-stopped",
+            # Traefik labels
+            "-l", "traefik.enable=true",
+            "-l", f"traefik.http.routers.{app.slug}.rule={app.traefik_rule}",
+            "-l", f"traefik.http.routers.{app.slug}.entrypoints=web",
+            "-l", f"traefik.http.services.{app.slug}.loadbalancer.server.port={app.container_port}",
+            # Strip path prefix so app receives clean URLs
+            "-l", f"traefik.http.middlewares.{app.slug}-strip.stripprefix.prefixes=/{app.slug}",
+            "-l", f"traefik.http.routers.{app.slug}.middlewares={app.slug}-strip",
+        ] + env_args + [image_tag]
+        
+        logs.append(f"Running container: {container_name}")
+        code, out, err = run_cmd(docker_run_cmd)
+        logs.append(f"Run output:\n{out}\n{err}")
+        
+        if code != 0:
+            raise Exception(f"Docker run failed: {err or out}")
+        
+        # Get container ID
+        app.container_id = out.strip()[:12]
+        app.status = "running"
+        app.save()
+        
+        deployment.status = "success"
+        deployment.logs = "\n".join(logs)
+        deployment.finished_at = timezone.now()
+        deployment.save()
+        
+        return Response({
+            "status": "running",
+            "container_id": app.container_id,
+            "url": f"/{app.slug}",
+            "deploy_mode": "dockerfile",
+            "message": f"App deployed! Access at http://YOUR_VPS_IP/{app.slug}"
+        })
     
     @action(detail=True, methods=["post"])
     def stop(self, request, pk=None):
         """Stop a running app."""
         app = self.get_object()
-        container_name = f"keystone-app-{app.slug}"
+        env_vars = app.env_vars or {}
+        deploy_mode = env_vars.get("_keystone_deploy_mode", "dockerfile")
         
-        run_cmd(["docker", "stop", container_name])
+        if deploy_mode == "compose":
+            # Stop compose stack
+            repo_dir = REPOS_DIR / app.slug
+            compose_file = env_vars.get("_keystone_compose_file", "docker-compose.yml")
+            project_name = f"keystone-{app.slug}"
+            run_cmd(
+                ["docker", "compose", "-p", project_name, "-f", compose_file, "stop"],
+                cwd=str(repo_dir)
+            )
+        else:
+            # Stop single container
+            container_name = f"keystone-app-{app.slug}"
+            run_cmd(["docker", "stop", container_name])
+        
         app.status = "stopped"
         app.save()
         
@@ -256,9 +441,22 @@ class AppViewSet(viewsets.ModelViewSet):
     def logs(self, request, pk=None):
         """Get container logs."""
         app = self.get_object()
-        container_name = f"keystone-app-{app.slug}"
+        env_vars = app.env_vars or {}
+        deploy_mode = env_vars.get("_keystone_deploy_mode", "dockerfile")
         
-        code, out, err = run_cmd(["docker", "logs", "--tail", "100", container_name])
+        if deploy_mode == "compose":
+            # Get compose logs
+            repo_dir = REPOS_DIR / app.slug
+            compose_file = env_vars.get("_keystone_compose_file", "docker-compose.yml")
+            project_name = f"keystone-{app.slug}"
+            code, out, err = run_cmd(
+                ["docker", "compose", "-p", project_name, "-f", compose_file, "logs", "--tail", "100"],
+                cwd=str(repo_dir)
+            )
+        else:
+            # Get single container logs
+            container_name = f"keystone-app-{app.slug}"
+            code, out, err = run_cmd(["docker", "logs", "--tail", "100", container_name])
         
         return Response({"logs": out or err})
     
