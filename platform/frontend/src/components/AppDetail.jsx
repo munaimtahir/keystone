@@ -237,7 +237,7 @@ export default function AppDetail({ app, onUpdate, onDelete }) {
                             onChange={(e) => setEnvText(e.target.value)}
                             placeholder='{"DEBUG": "0", "SECRET_KEY": "..."}'
                           />
-                          <p className="text-xs text-gray-500 mt-1">JSON format: {"key": "value"}</p>
+                          <p className="text-xs text-gray-500 mt-1">JSON format: {`{"key": "value"}`}</p>
                         </div>
                       )}
                     </div>
