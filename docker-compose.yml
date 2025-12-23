@@ -76,6 +76,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-keystone}:${POSTGRES_PASSWORD:-keystone}@db:5432/${POSTGRES_DB:-keystone}
       KEYSTONE_ADMIN_USERNAME: ${KEYSTONE_ADMIN_USERNAME:-admin}
       KEYSTONE_ADMIN_PASSWORD: ${KEYSTONE_ADMIN_PASSWORD:-admin}
+      # Host path for runtime directory (needed for Docker-in-Docker volume mounts)
+      HOST_RUNTIME_PATH: ${HOST_RUNTIME_PATH:-/home/munaim/keystone/repos/keystone/runtime}
     volumes:
       # Mount Docker socket so backend can manage containers
       - /var/run/docker.sock:/var/run/docker.sock

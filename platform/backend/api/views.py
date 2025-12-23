@@ -39,11 +39,20 @@ def inject_traefik_config(compose_path, app_slug, app_traefik_rule):
     - Adds Traefik labels to web-facing services
     - Connects services to keystone_web network
     - Removes conflicting port mappings (80, 443)
+    - Converts relative volume mounts to absolute paths
     - Backs up original file
     """
     # Read original compose file
     with open(compose_path, 'r') as f:
         compose_data = yaml.safe_load(f)
+    
+    # Get the absolute path of the repo directory for volume mount conversion
+    repo_dir = compose_path.parent
+    
+    # Convert container path to host path for Docker-in-Docker volume mounts
+    # Container has /runtime/repos, but Docker needs host path
+    host_runtime_path = os.environ.get('HOST_RUNTIME_PATH', '/runtime')
+    container_runtime_path = '/runtime'
     
     if not compose_data or 'services' not in compose_data:
         raise Exception("Invalid docker-compose.yml: no services found")
@@ -58,11 +67,46 @@ def inject_traefik_config(compose_path, app_slug, app_traefik_rule):
     web_service_names = ['nginx', 'frontend', 'web', 'proxy', 'gateway', 'app']
     backend_service_names = ['backend', 'api', 'server', 'django', 'flask', 'fastapi']
     
-    # Find services that expose web ports or match web service names
+    # Process ALL services - convert volumes and add network
     for service_name, service_config in compose_data['services'].items():
         if service_config is None:
             service_config = {}
             compose_data['services'][service_name] = service_config
+        
+        # Convert relative volume mounts to absolute HOST paths
+        # This is needed for Docker-in-Docker: the path must be valid on the Docker host
+        if 'volumes' in service_config:
+            new_volumes = []
+            for vol in service_config['volumes']:
+                if isinstance(vol, str):
+                    # Short syntax: ./host:container or ./host:container:ro
+                    if vol.startswith('./') or vol.startswith('../'):
+                        parts = vol.split(':')
+                        host_path = parts[0]
+                        # Convert relative to absolute (container path)
+                        container_abs_path = str((repo_dir / host_path).resolve())
+                        # Convert container path to host path
+                        if container_abs_path.startswith(container_runtime_path):
+                            host_abs_path = container_abs_path.replace(container_runtime_path, host_runtime_path, 1)
+                        else:
+                            host_abs_path = container_abs_path
+                        parts[0] = host_abs_path
+                        vol = ':'.join(parts)
+                    new_volumes.append(vol)
+                elif isinstance(vol, dict):
+                    # Long syntax with 'source' key
+                    source = vol.get('source', '')
+                    if source.startswith('./') or source.startswith('../'):
+                        container_abs_path = str((repo_dir / source).resolve())
+                        if container_abs_path.startswith(container_runtime_path):
+                            host_abs_path = container_abs_path.replace(container_runtime_path, host_runtime_path, 1)
+                        else:
+                            host_abs_path = container_abs_path
+                        vol['source'] = host_abs_path
+                    new_volumes.append(vol)
+                else:
+                    new_volumes.append(vol)
+            service_config['volumes'] = new_volumes
         
         is_web_service = False
         service_port = None
